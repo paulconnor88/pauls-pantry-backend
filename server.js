@@ -7,7 +7,7 @@ const cors = require('cors');
 const sgMail = require('@sendgrid/mail');
 const cron = require('node-cron');
 const { parse } = require('node-html-parser');
-const Anthropic = require('@anthropic-ai/sdk');
+// const Anthropic = require('@anthropic-ai/sdk');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -23,9 +23,9 @@ const FROM_EMAIL = 'paulconnor88@gmail.com';
 const TO_EMAILS = ['paulconnor88@gmail.com', 'debsrinkoff@gmail.com'];
 
 // Claude API configuration
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
-});
+//const anthropic = new Anthropic({
+  //apiKey: process.env.ANTHROPIC_API_KEY,
+//});
 
 // Database setup
 const pool = new Pool({
