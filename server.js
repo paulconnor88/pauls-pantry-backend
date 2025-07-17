@@ -7,6 +7,7 @@ const cors = require('cors');
 const sgMail = require('@sendgrid/mail');
 const cron = require('node-cron');
 const { parse } = require('node-html-parser');
+const Anthropic = require('@anthropic-ai/sdk');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -20,6 +21,11 @@ app.use(express.raw({ type: 'text/plain' }));
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 const FROM_EMAIL = 'paulconnor88@gmail.com';
 const TO_EMAILS = ['paulconnor88@gmail.com', 'debsrinkoff@gmail.com'];
+
+// Claude API configuration
+const anthropic = new Anthropic({
+  apiKey: process.env.ANTHROPIC_API_KEY,
+});
 
 // Database setup
 const pool = new Pool({
@@ -166,6 +172,90 @@ app.delete('/api/items/:id', async (req, res) => {
   }
 });
 
+// Debug endpoint to test Claude API directly
+app.post('/api/debug-claude', async (req, res) => {
+  const { response } = req.body;
+  
+  let debugInfo = {
+    timestamp: new Date().toISOString(),
+    input: response,
+    apiKeyExists: !!process.env.ANTHROPIC_API_KEY,
+    apiKeyLength: process.env.ANTHROPIC_API_KEY ? process.env.ANTHROPIC_API_KEY.length : 0,
+    error: null,
+    claudeRawResponse: null,
+    claudeParsedResponse: null,
+    step: 'starting'
+  };
+  
+  try {
+    debugInfo.step = 'checking-api-key';
+    
+    if (!process.env.ANTHROPIC_API_KEY) {
+      debugInfo.error = 'ANTHROPIC_API_KEY not found in environment variables';
+      debugInfo.availableEnvVars = Object.keys(process.env).filter(key => key.includes('ANTHROPIC'));
+      return res.json(debugInfo);
+    }
+    
+    debugInfo.step = 'fetching-items';
+    const result = await pool.query("SELECT * FROM items WHERE status = 'active'");
+    const items = result.rows;
+    debugInfo.itemsCount = items.length;
+    
+    debugInfo.step = 'creating-prompt';
+    const prompt = `You are a household inventory assistant. Parse this natural language response about household items and return structured JSON.
+
+Current items in inventory:
+${items.map(item => `- ${item.name} (${item.category}, lasts ${item.estimated_duration_days} days)`).join('\n')}
+
+User response: "${response}"
+
+Return ONLY valid JSON in this format:
+{
+  "updates": [{"itemName": "Dog food", "daysUntilNeeded": 14}],
+  "newItems": [{"itemName": "fairy liquid", "category": "House", "durationDays": 30}],
+  "removeItems": []
+}`;
+
+    debugInfo.step = 'calling-claude';
+    debugInfo.promptLength = prompt.length;
+    
+    const claudeResponse = await anthropic.messages.create({
+      model: "claude-3-haiku-20240307",
+      max_tokens: 1000,
+      messages: [{ role: "user", content: prompt }]
+    });
+    
+    debugInfo.step = 'processing-claude-response';
+    debugInfo.claudeRawResponse = claudeResponse.content[0].text;
+    
+    // Try to parse JSON
+    let cleanedText = debugInfo.claudeRawResponse.trim();
+    if (cleanedText.startsWith('```json')) {
+      cleanedText = cleanedText.replace(/^```json\s*/, '').replace(/\s*```$/, '');
+    }
+    if (cleanedText.startsWith('```')) {
+      cleanedText = cleanedText.replace(/^```\s*/, '').replace(/\s*```$/, '');
+    }
+    
+    debugInfo.claudeCleanedResponse = cleanedText;
+    
+    try {
+      debugInfo.claudeParsedResponse = JSON.parse(cleanedText);
+      debugInfo.step = 'success';
+    } catch (parseError) {
+      debugInfo.error = `JSON parse error: ${parseError.message}`;
+      debugInfo.step = 'json-parse-failed';
+    }
+    
+  } catch (error) {
+    debugInfo.error = error.message;
+    debugInfo.errorStack = error.stack;
+    debugInfo.step = 'claude-api-error';
+  }
+  
+  res.json(debugInfo);
+});
+
 // Send reminder email manually
 app.post('/api/send-reminder', async (req, res) => {
   try {
@@ -214,14 +304,14 @@ app.post('/api/process-response', async (req, res) => {
     const result = await pool.query("SELECT * FROM items WHERE status = 'active'");
     const items = result.rows;
     
-    const mockClaudeResponse = await mockParseResponse(response, items);
+    const claudeResponse = await processWithClaude(response, items);
     
     let updatesApplied = [];
     const today = new Date().toISOString().split('T')[0];
     
     // Process updates
-    if (mockClaudeResponse.updates) {
-      for (const update of mockClaudeResponse.updates) {
+    if (claudeResponse.updates && claudeResponse.updates.length > 0) {
+      for (const update of claudeResponse.updates) {
         const item = items.find(i => 
           i.name.toLowerCase().includes(update.itemName.toLowerCase()) ||
           update.itemName.toLowerCase().includes(i.name.toLowerCase())
@@ -257,8 +347,8 @@ app.post('/api/process-response', async (req, res) => {
     }
     
     // Add new items
-    if (mockClaudeResponse.newItems) {
-      for (const newItem of mockClaudeResponse.newItems) {
+    if (claudeResponse.newItems && claudeResponse.newItems.length > 0) {
+      for (const newItem of claudeResponse.newItems) {
         let lastPurchased = today;
         
         if (newItem.status === 'out_of') {
@@ -277,8 +367,8 @@ app.post('/api/process-response', async (req, res) => {
     }
     
     // Remove items
-    if (mockClaudeResponse.removeItems) {
-      for (const removeItem of mockClaudeResponse.removeItems) {
+    if (claudeResponse.removeItems && claudeResponse.removeItems.length > 0) {
+      for (const removeItem of claudeResponse.removeItems) {
         const item = items.find(i => 
           i.name.toLowerCase().includes(removeItem.itemName.toLowerCase())
         );
@@ -300,49 +390,73 @@ app.post('/api/process-response', async (req, res) => {
   }
 });
 
-// Mock Claude response parser (replace with real Claude API call)
-async function mockParseResponse(response, items) {
-  // Simple mock parser - replace this with actual Claude API call
-  const updates = [];
-  const newItems = [];
-  
-  if (response.toLowerCase().includes('ordered')) {
-    const words = response.split(' ');
-    for (let i = 0; i < words.length; i++) {
-      if (words[i].toLowerCase().includes('ordered')) {
-        // Look backwards for item name
-        for (let j = i - 1; j >= 0; j--) {
-          const potentialItem = items.find(item => 
-            item.name.toLowerCase().includes(words[j].toLowerCase())
-          );
-          if (potentialItem) {
-            updates.push({
-              itemName: potentialItem.name,
-              status: 'ordered'
-            });
-            break;
-          }
-        }
-      }
-    }
+// Claude API response parser
+async function processWithClaude(response, items) {
+  if (!process.env.ANTHROPIC_API_KEY) {
+    return {
+      updates: [],
+      newItems: [],
+      removeItems: []
+    };
   }
   
-  return { updates, newItems, removeItems: [] };
+  try {
+    const prompt = `You are a household inventory assistant. Parse this natural language response about household items and return structured JSON.
+
+Current items in inventory:
+${items.map(item => `- ${item.name} (${item.category}, lasts ${item.estimated_duration_days} days)`).join('\n')}
+
+User response: "${response}"
+
+Return ONLY valid JSON in this format:
+{
+  "updates": [{"itemName": "Dog food", "daysUntilNeeded": 14}],
+  "newItems": [{"itemName": "fairy liquid", "category": "House", "durationDays": 30}],
+  "removeItems": []
+}`;
+
+    const claudeResponse = await anthropic.messages.create({
+      model: "claude-3-haiku-20240307",
+      max_tokens: 1000,
+      messages: [{ role: "user", content: prompt }]
+    });
+    
+    const claudeText = claudeResponse.content[0].text;
+    
+    // Clean the response
+    let cleanedText = claudeText.trim();
+    if (cleanedText.startsWith('```json')) {
+      cleanedText = cleanedText.replace(/^```json\s*/, '').replace(/\s*```$/, '');
+    }
+    if (cleanedText.startsWith('```')) {
+      cleanedText = cleanedText.replace(/^```\s*/, '').replace(/\s*```$/, '');
+    }
+    
+    try {
+      return JSON.parse(cleanedText);
+    } catch (parseError) {
+      return {
+        updates: [],
+        newItems: [],
+        removeItems: []
+      };
+    }
+
+  } catch (error) {
+    return {
+      updates: [],
+      newItems: [],
+      removeItems: []
+    };
+  }
 }
 
 // Webhook for email replies (SendGrid Inbound Parse)
 app.post('/webhook/email-reply', (req, res) => {
   try {
     const email = req.body;
-    
-    // Extract text content from email
     const emailText = email.text || email.html;
-    
     console.log('📧 Received email reply:', emailText);
-    
-    // Process the email content as a natural language response
-    // This would call the same logic as /api/process-response
-    
     res.status(200).send('OK');
   } catch (error) {
     console.error('Error processing email webhook:', error);
@@ -350,7 +464,7 @@ app.post('/webhook/email-reply', (req, res) => {
   }
 });
 
-//Daily work schedule
+// Daily work schedule
 cron.schedule('0 9 * * *', async () => {
   console.log('🕘 Running daily reminder check...');
   
