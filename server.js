@@ -7,7 +7,18 @@ const cors = require('cors');
 const sgMail = require('@sendgrid/mail');
 const cron = require('node-cron');
 const { parse } = require('node-html-parser');
-// const Anthropic = require('@anthropic-ai/sdk');
+
+// Try to load Anthropic SDK if available
+let anthropic = null;
+try {
+  const Anthropic = require('@anthropic-ai/sdk');
+  anthropic = new Anthropic({
+    apiKey: process.env.ANTHROPIC_API_KEY,
+  });
+  console.log('✅ Anthropic SDK loaded successfully');
+} catch (error) {
+  console.log('❌ Anthropic SDK not available:', error.message);
+}
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -21,11 +32,6 @@ app.use(express.raw({ type: 'text/plain' }));
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 const FROM_EMAIL = 'paulconnor88@gmail.com';
 const TO_EMAILS = ['paulconnor88@gmail.com', 'debsrinkoff@gmail.com'];
-
-// Claude API configuration
-//const anthropic = new Anthropic({
-  //apiKey: process.env.ANTHROPIC_API_KEY,
-//});
 
 // Database setup
 const pool = new Pool({
@@ -179,6 +185,7 @@ app.post('/api/debug-claude', async (req, res) => {
   let debugInfo = {
     timestamp: new Date().toISOString(),
     input: response,
+    anthropicSDKLoaded: !!anthropic,
     apiKeyExists: !!process.env.ANTHROPIC_API_KEY,
     apiKeyLength: process.env.ANTHROPIC_API_KEY ? process.env.ANTHROPIC_API_KEY.length : 0,
     error: null,
@@ -188,7 +195,12 @@ app.post('/api/debug-claude', async (req, res) => {
   };
   
   try {
-    debugInfo.step = 'checking-api-key';
+    debugInfo.step = 'checking-prerequisites';
+    
+    if (!anthropic) {
+      debugInfo.error = 'Anthropic SDK not loaded - package not installed';
+      return res.json(debugInfo);
+    }
     
     if (!process.env.ANTHROPIC_API_KEY) {
       debugInfo.error = 'ANTHROPIC_API_KEY not found in environment variables';
@@ -392,7 +404,9 @@ app.post('/api/process-response', async (req, res) => {
 
 // Claude API response parser
 async function processWithClaude(response, items) {
-  if (!process.env.ANTHROPIC_API_KEY) {
+  // Check if Anthropic SDK is available
+  if (!anthropic || !process.env.ANTHROPIC_API_KEY) {
+    console.log('Claude SDK not available, returning empty response');
     return {
       updates: [],
       newItems: [],
@@ -435,6 +449,7 @@ Return ONLY valid JSON in this format:
     try {
       return JSON.parse(cleanedText);
     } catch (parseError) {
+      console.log('Failed to parse Claude response as JSON:', parseError.message);
       return {
         updates: [],
         newItems: [],
@@ -443,6 +458,7 @@ Return ONLY valid JSON in this format:
     }
 
   } catch (error) {
+    console.log('Error calling Claude API:', error.message);
     return {
       updates: [],
       newItems: [],
@@ -503,7 +519,12 @@ cron.schedule('0 9 * * *', async () => {
 
 // Health check
 app.get('/health', (req, res) => {
-  res.json({ status: 'healthy', timestamp: new Date().toISOString() });
+  res.json({ 
+    status: 'healthy', 
+    timestamp: new Date().toISOString(),
+    anthropicSDK: !!anthropic,
+    apiKey: !!process.env.ANTHROPIC_API_KEY
+  });
 });
 
 // Start server
@@ -511,6 +532,7 @@ app.listen(PORT, () => {
   console.log(`🚀 Paul's Pantry API running on port ${PORT}`);
   console.log(`📧 Email notifications: ${TO_EMAILS.join(', ')}`);
   console.log(`📅 Daily reminders scheduled for 9:00 AM`);
+  console.log(`🤖 Anthropic SDK: ${anthropic ? 'Loaded' : 'Not available'}`);
 });
 
 module.exports = app;
