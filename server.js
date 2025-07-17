@@ -26,6 +26,8 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL || 'postgresql://localhost:5432/pantry'
 });
 
+console.log('🚀 Using Claude HTTP integration - no SDK dependencies needed!');
+
 // Initialize database
 const initializeDatabase = async () => {
   try {
@@ -113,6 +115,93 @@ const generateReminderEmail = (lowItems) => {
   return emailContent;
 };
 
+// Claude HTTP Integration Function
+async function processWithClaude(response, items) {
+  if (!process.env.ANTHROPIC_API_KEY) {
+    console.log('❌ Anthropic API key not available');
+    return { updates: [], newItems: [], removeItems: [] };
+  }
+
+  try {
+    console.log('🤖 Processing with Claude via HTTP...');
+    
+    const prompt = `You are a household inventory assistant. Analyze this user response about their pantry items and determine what updates need to be made.
+
+Current inventory:
+${items.map(item => `- ${item.name} (${item.category}, lasts ${item.estimated_duration_days} days)`).join('\n')}
+
+User response: "${response}"
+
+Analyze the response and return a JSON object with updates needed. For each item mentioned:
+- If they say it's "good for X weeks/days", calculate when they need to buy it next
+- If they say they're "nearly out" or "running low", they need it soon
+- If they mention ordering or buying items, update the purchase date
+
+Return ONLY valid JSON in this exact format:
+{
+  "updates": [
+    {
+      "itemName": "Dog food",
+      "daysUntilNeeded": 14,
+      "reason": "User said good for 2 weeks"
+    }
+  ],
+  "newItems": [],
+  "removeItems": []
+}`;
+
+    const claudeResponse = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: 'claude-3-haiku-20240307',
+        max_tokens: 1024,
+        messages: [{ role: 'user', content: prompt }]
+      })
+    });
+
+    if (!claudeResponse.ok) {
+      throw new Error(`Claude API error: ${claudeResponse.status} ${claudeResponse.statusText}`);
+    }
+
+    const result = await claudeResponse.json();
+    console.log('✅ Claude HTTP response received');
+    
+    const claudeText = result.content[0].text;
+    console.log('Claude response:', claudeText);
+    
+    // Clean and parse JSON response
+    let cleanedText = claudeText.trim();
+    if (cleanedText.startsWith('```json')) {
+      cleanedText = cleanedText.replace(/^```json\s*/, '').replace(/\s*```$/, '');
+    }
+    if (cleanedText.startsWith('```')) {
+      cleanedText = cleanedText.replace(/^```\s*/, '').replace(/\s*```$/, '');
+    }
+    
+    try {
+      const analysis = JSON.parse(cleanedText);
+      console.log('✅ Claude HTTP integration working!', analysis);
+      return {
+        updates: analysis.updates || [],
+        newItems: analysis.newItems || [],
+        removeItems: analysis.removeItems || []
+      };
+    } catch (parseError) {
+      console.log('❌ Failed to parse Claude response as JSON:', parseError.message);
+      return { updates: [], newItems: [], removeItems: [] };
+    }
+
+  } catch (error) {
+    console.log('❌ Claude HTTP integration error:', error.message);
+    return { updates: [], newItems: [], removeItems: [] };
+  }
+}
+
 // API Routes
 
 app.get('/api/items', async (req, res) => {
@@ -138,7 +227,6 @@ app.post('/api/items', async (req, res) => {
   }
 });
 
-// Update item
 app.put('/api/items/:id', async (req, res) => {
   const { name, category, lastPurchased, estimatedDurationDays } = req.body;
   const { id } = req.params;
@@ -154,7 +242,6 @@ app.put('/api/items/:id', async (req, res) => {
   }
 });
 
-// Delete item
 app.delete('/api/items/:id', async (req, res) => {
   const { id } = req.params;
   
@@ -163,6 +250,31 @@ app.delete('/api/items/:id', async (req, res) => {
     res.json({ message: 'Item deleted successfully' });
   } catch (error) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+// Debug endpoint to test Claude HTTP integration
+app.post('/api/debug-claude', async (req, res) => {
+  const { response } = req.body;
+  
+  try {
+    const result = await pool.query("SELECT * FROM items WHERE status = 'active'");
+    const items = result.rows;
+    
+    const claudeResponse = await processWithClaude(response, items);
+    
+    res.json({
+      success: true,
+      input: response,
+      claudeResponse: claudeResponse,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
   }
 });
 
@@ -189,7 +301,6 @@ app.post('/api/send-reminder', async (req, res) => {
     
     await sgMail.send(msg);
     
-    // Log the email
     await pool.query(
       'INSERT INTO email_logs (email_content, recipients, type) VALUES ($1, $2, $3)',
       [emailContent, TO_EMAILS.join(', '), 'manual']
@@ -214,14 +325,14 @@ app.post('/api/process-response', async (req, res) => {
     const result = await pool.query("SELECT * FROM items WHERE status = 'active'");
     const items = result.rows;
     
-    const mockClaudeResponse = await mockParseResponse(response, items);
+    const claudeResponse = await processWithClaude(response, items);
     
     let updatesApplied = [];
     const today = new Date().toISOString().split('T')[0];
     
     // Process updates
-    if (mockClaudeResponse.updates) {
-      for (const update of mockClaudeResponse.updates) {
+    if (claudeResponse.updates && claudeResponse.updates.length > 0) {
+      for (const update of claudeResponse.updates) {
         const item = items.find(i => 
           i.name.toLowerCase().includes(update.itemName.toLowerCase()) ||
           update.itemName.toLowerCase().includes(i.name.toLowerCase())
@@ -229,64 +340,34 @@ app.post('/api/process-response', async (req, res) => {
         
         if (item) {
           let newLastPurchased = item.last_purchased;
-          let newDuration = item.estimated_duration_days;
           
-          if (update.status === 'ordered') {
-            newLastPurchased = today;
-            updatesApplied.push(`${item.name}: marked as ordered, reset cycle`);
-          } else if (update.daysUntilNeeded) {
+          if (update.daysUntilNeeded) {
+            // Calculate when they last purchased it based on when they need it
             const targetDate = new Date();
             targetDate.setDate(targetDate.getDate() + update.daysUntilNeeded);
             const calculatedDate = new Date(targetDate);
-            calculatedDate.setDate(calculatedDate.getDate() - (update.newDurationDays || item.estimated_duration_days));
+            calculatedDate.setDate(calculatedDate.getDate() - item.estimated_duration_days);
             newLastPurchased = calculatedDate.toISOString().split('T')[0];
-            updatesApplied.push(`${item.name}: updated timeline`);
-          }
-          
-          if (update.newDurationDays) {
-            newDuration = update.newDurationDays;
-            updatesApplied.push(`${item.name}: frequency changed to ${newDuration} days`);
           }
           
           await pool.query(
-            'UPDATE items SET last_purchased = $1, estimated_duration_days = $2 WHERE id = $3',
-            [newLastPurchased, newDuration, item.id]
+            'UPDATE items SET last_purchased = $1 WHERE id = $2',
+            [newLastPurchased, item.id]
           );
+          
+          updatesApplied.push(`${item.name}: ${update.reason || 'timeline updated'}`);
         }
       }
     }
     
     // Add new items
-    if (mockClaudeResponse.newItems) {
-      for (const newItem of mockClaudeResponse.newItems) {
-        let lastPurchased = today;
-        
-        if (newItem.status === 'out_of') {
-          const pastDate = new Date();
-          pastDate.setDate(pastDate.getDate() - (newItem.durationDays || 30) - 1);
-          lastPurchased = pastDate.toISOString().split('T')[0];
-        }
-        
+    if (claudeResponse.newItems && claudeResponse.newItems.length > 0) {
+      for (const newItem of claudeResponse.newItems) {
         await pool.query(
           'INSERT INTO items (name, category, last_purchased, estimated_duration_days) VALUES ($1, $2, $3, $4)',
-          [newItem.itemName, newItem.category || 'House', lastPurchased, newItem.durationDays || 30]
+          [newItem.itemName, newItem.category || 'House', today, newItem.durationDays || 30]
         );
-        
         updatesApplied.push(`Added: ${newItem.itemName}`);
-      }
-    }
-    
-    // Remove items
-    if (mockClaudeResponse.removeItems) {
-      for (const removeItem of mockClaudeResponse.removeItems) {
-        const item = items.find(i => 
-          i.name.toLowerCase().includes(removeItem.itemName.toLowerCase())
-        );
-        
-        if (item) {
-          await pool.query("UPDATE items SET status = 'deleted' WHERE id = $1", [item.id]);
-          updatesApplied.push(`Removed: ${item.name}`);
-        }
       }
     }
     
@@ -300,49 +381,12 @@ app.post('/api/process-response', async (req, res) => {
   }
 });
 
-// Mock Claude response parser (replace with real Claude API call)
-async function mockParseResponse(response, items) {
-  // Simple mock parser - replace this with actual Claude API call
-  const updates = [];
-  const newItems = [];
-  
-  if (response.toLowerCase().includes('ordered')) {
-    const words = response.split(' ');
-    for (let i = 0; i < words.length; i++) {
-      if (words[i].toLowerCase().includes('ordered')) {
-        // Look backwards for item name
-        for (let j = i - 1; j >= 0; j--) {
-          const potentialItem = items.find(item => 
-            item.name.toLowerCase().includes(words[j].toLowerCase())
-          );
-          if (potentialItem) {
-            updates.push({
-              itemName: potentialItem.name,
-              status: 'ordered'
-            });
-            break;
-          }
-        }
-      }
-    }
-  }
-  
-  return { updates, newItems, removeItems: [] };
-}
-
-// Webhook for email replies (SendGrid Inbound Parse)
+// Webhook for email replies
 app.post('/webhook/email-reply', (req, res) => {
   try {
     const email = req.body;
-    
-    // Extract text content from email
     const emailText = email.text || email.html;
-    
     console.log('📧 Received email reply:', emailText);
-    
-    // Process the email content as a natural language response
-    // This would call the same logic as /api/process-response
-    
     res.status(200).send('OK');
   } catch (error) {
     console.error('Error processing email webhook:', error);
@@ -350,7 +394,7 @@ app.post('/webhook/email-reply', (req, res) => {
   }
 });
 
-//Daily work schedule
+// Daily reminder schedule
 cron.schedule('0 9 * * *', async () => {
   console.log('🕘 Running daily reminder check...');
   
@@ -372,7 +416,6 @@ cron.schedule('0 9 * * *', async () => {
       
       await sgMail.send(msg);
       
-      // Log the email
       await pool.query(
         'INSERT INTO email_logs (email_content, recipients, type) VALUES ($1, $2, $3)',
         [emailContent, TO_EMAILS.join(', '), 'automatic']
@@ -389,7 +432,13 @@ cron.schedule('0 9 * * *', async () => {
 
 // Health check
 app.get('/health', (req, res) => {
-  res.json({ status: 'healthy', timestamp: new Date().toISOString() });
+  res.json({ 
+    status: 'healthy', 
+    timestamp: new Date().toISOString(),
+    claudeHTTP: !!process.env.ANTHROPIC_API_KEY,
+    apiKey: !!process.env.ANTHROPIC_API_KEY,
+    databaseConnection: true
+  });
 });
 
 // Start server
@@ -397,6 +446,7 @@ app.listen(PORT, () => {
   console.log(`🚀 Paul's Pantry API running on port ${PORT}`);
   console.log(`📧 Email notifications: ${TO_EMAILS.join(', ')}`);
   console.log(`📅 Daily reminders scheduled for 9:00 AM`);
+  console.log(`🤖 Claude HTTP: ${process.env.ANTHROPIC_API_KEY ? 'Ready' : 'API key missing'}`);
 });
 
 module.exports = app;
