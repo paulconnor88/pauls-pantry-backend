@@ -145,7 +145,7 @@ const generateReminderSMS = (lowItems) => {
   return `Paul's Pantry: Low on ${itemNames}. Reply with status!`;
 };
 
-// ULTRA AGGRESSIVE Claude HTTP Integration Function
+// Claude HTTP Integration Function
 async function processWithClaude(response, items) {
   if (!process.env.ANTHROPIC_API_KEY) {
     console.log('❌ Anthropic API key not available');
@@ -155,9 +155,7 @@ async function processWithClaude(response, items) {
   try {
     console.log('🤖 Processing with Claude via HTTP...');
     
-// CLEAN Claude prompt - replace the prompt section in processWithClaude
-
-const prompt = `You are a household inventory assistant. You MUST ONLY process items that the user explicitly mentions.
+    const prompt = `You are a household inventory assistant. You MUST ONLY process items that the user explicitly mentions.
 
 CURRENT INVENTORY:
 ${items.map(item => `- ID:${item.id} "${item.name}" (${item.category})`).join('\n')}
@@ -196,8 +194,6 @@ Return ONLY valid JSON with NO explanations:
   ],
   "removeItems": []
 }`;
-
-BE AGGRESSIVE - CREATE ANY ITEMS THE USER MENTIONS!`;
 
     console.log('📤 Sending prompt to Claude...');
 
@@ -369,7 +365,7 @@ app.post('/api/send-reminder', async (req, res) => {
   }
 });
 
-// FIXED Process natural language response endpoint
+// Process natural language response
 app.post('/api/process-response', async (req, res) => {
   const { userInput } = req.body;
   
