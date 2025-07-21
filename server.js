@@ -8,6 +8,28 @@ const sgMail = require('@sendgrid/mail');
 const cron = require('node-cron');
 const { parse } = require('node-html-parser');
 
+// Add Twilio for SMS
+const twilioSendSMS = async (phoneNumber, message) => {
+  const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${process.env.TWILIO_SID}/Messages.json`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Basic ${Buffer.from(`${process.env.TWILIO_SID}:${process.env.TWILIO_TOKEN}`).toString('base64')}`,
+      'Content-Type': 'application/x-www-form-urlencoded'
+    },
+    body: new URLSearchParams({
+      To: phoneNumber,
+      From: process.env.TWILIO_PHONE_NUMBER,
+      Body: message
+    })
+  });
+  
+  if (!response.ok) {
+    throw new Error(`SMS failed: ${response.status}`);
+  }
+  
+  return response.json();
+};
+
 const app = express();
 const PORT = process.env.PORT || 3001;
 
@@ -113,6 +135,14 @@ const generateReminderEmail = (lowItems) => {
   emailContent += "—Paul's Pantry 🏠";
   
   return emailContent;
+};
+
+// SMS version - shorter format for 160 char limit
+const generateReminderSMS = (lowItems) => {
+  if (lowItems.length === 0) return null;
+  
+  const itemNames = lowItems.map(item => item.name).join(', ');
+  return `Paul's Pantry: Low on ${itemNames}. Reply with status!`;
 };
 
 // Claude HTTP Integration Function
@@ -390,6 +420,59 @@ app.post('/webhook/email-reply', (req, res) => {
     res.status(200).send('OK');
   } catch (error) {
     console.error('Error processing email webhook:', error);
+    res.status(500).send('Error');
+  }
+});
+
+// Webhook for SMS replies  
+app.post('/webhook/sms-reply', async (req, res) => {
+  try {
+    const { Body, From } = req.body; // Twilio webhook format
+    console.log('📱 Received SMS reply:', Body, 'from:', From);
+    
+    // Process SMS using existing Claude logic
+    const result = await pool.query("SELECT * FROM items WHERE status = 'active'");
+    const items = result.rows;
+    
+    const claudeResponse = await processWithClaude(Body, items);
+    
+    // Apply updates (same logic as /api/process-response)
+    let updatesApplied = [];
+    const today = new Date().toISOString().split('T')[0];
+    
+    if (claudeResponse.updates && claudeResponse.updates.length > 0) {
+      for (const update of claudeResponse.updates) {
+        const item = items.find(i => 
+          i.name.toLowerCase().includes(update.itemName.toLowerCase()) ||
+          update.itemName.toLowerCase().includes(i.name.toLowerCase())
+        );
+        
+        if (item && update.daysUntilNeeded) {
+          const targetDate = new Date();
+          targetDate.setDate(targetDate.getDate() + update.daysUntilNeeded);
+          const calculatedDate = new Date(targetDate);
+          calculatedDate.setDate(calculatedDate.getDate() - item.estimated_duration_days);
+          const newLastPurchased = calculatedDate.toISOString().split('T')[0];
+          
+          await pool.query(
+            'UPDATE items SET last_purchased = $1 WHERE id = $2',
+            [newLastPurchased, item.id]
+          );
+          
+          updatesApplied.push(item.name);
+        }
+      }
+    }
+    
+    // Send confirmation SMS if updates were made
+    if (updatesApplied.length > 0 && process.env.TWILIO_PHONE_NUMBER) {
+      const confirmationMsg = `✅ Updated: ${updatesApplied.join(', ')}`;
+      await twilioSendSMS(From, confirmationMsg);
+    }
+    
+    res.status(200).send('<Response></Response>'); // TwiML response
+  } catch (error) {
+    console.error('Error processing SMS webhook:', error);
     res.status(500).send('Error');
   }
 });

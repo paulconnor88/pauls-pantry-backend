@@ -9,15 +9,13 @@
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.24.2",
     "@sendgrid/mail": "^7.7.0",
     "cors": "^2.8.5",
     "express": "^4.18.2",
     "node-cron": "^3.0.2",
     "node-html-parser": "^6.1.5",
     "pg": "^8.16.3"
-  },
-  "devDependencies": {
-    "nodemon": "^3.0.1"
   },
   "keywords": [
     "pantry",
@@ -26,5 +24,8 @@
     "automation"
   ],
   "author": "Paul Connor",
-  "license": "MIT"
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  }
 }
