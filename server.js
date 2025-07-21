@@ -155,7 +155,9 @@ async function processWithClaude(response, items) {
   try {
     console.log('🤖 Processing with Claude via HTTP...');
     
-    const prompt = `You are a household inventory assistant. You MUST create entries for ANY items mentioned by users.
+// CLEAN Claude prompt - replace the prompt section in processWithClaude
+
+const prompt = `You are a household inventory assistant. You MUST ONLY process items that the user explicitly mentions.
 
 CURRENT INVENTORY:
 ${items.map(item => `- ID:${item.id} "${item.name}" (${item.category})`).join('\n')}
@@ -170,31 +172,19 @@ CATEGORY RULES:
 - Health: vitamins, medicine, paracetamol, plasters, supplements
 
 PARSING RULES:
-1. If user mentions ANY item not in current inventory - CREATE IT in newItems
-2. If user mentions an existing item - UPDATE IT in updates array
-3. Parse "1 week" = 7 days, "2 weeks" = 14 days, "1 month" = 30 days
-4. Parse "today" = ${new Date().toISOString().split('T')[0]}
-5. Parse "yesterday" = ${new Date(Date.now() - 86400000).toISOString().split('T')[0]}
-6. Parse "bought X days ago" = subtract X days from today
+1. ONLY process items the user explicitly mentions in their input
+2. If user mentions an item NOT in current inventory - CREATE IT in newItems
+3. If user mentions an item that EXISTS in inventory - UPDATE IT in updates array
+4. Parse "1 week" = 7 days, "2 weeks" = 14 days, "1 month" = 30 days
+5. Parse "today" = ${new Date().toISOString().split('T')[0]}
+6. Parse "yesterday" = ${new Date(Date.now() - 86400000).toISOString().split('T')[0]}
 
-EXAMPLES:
-- "bread, 1 week, bought today" = CREATE bread in Food category, 7 days duration, purchased today
-- "milk, 1 week" = CREATE milk in Food category, 7 days duration
-- "nappies, 2 weeks, bought yesterday" = UPDATE existing nappies (ID:3)
-- "dog treats" = CREATE dog treats in Pet category
+CRITICAL: Do NOT make up updates for items the user didn't mention. Only process what they actually said.
 
-You MUST return ONLY valid JSON. NO explanations, NO markdown, NO extra text:
+Return ONLY valid JSON with NO explanations:
 
 {
-  "updates": [
-    {
-      "itemId": 3,
-      "itemName": "Nappies",
-      "newLastPurchased": "2025-07-20",
-      "newDurationDays": 14,
-      "reason": "User updated timeline"
-    }
-  ],
+  "updates": [],
   "newItems": [
     {
       "itemName": "Bread",
@@ -205,7 +195,7 @@ You MUST return ONLY valid JSON. NO explanations, NO markdown, NO extra text:
     }
   ],
   "removeItems": []
-}
+}`;
 
 BE AGGRESSIVE - CREATE ANY ITEMS THE USER MENTIONS!`;
 
