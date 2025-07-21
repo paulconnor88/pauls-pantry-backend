@@ -145,7 +145,7 @@ const generateReminderSMS = (lowItems) => {
   return `Paul's Pantry: Low on ${itemNames}. Reply with status!`;
 };
 
-// Claude HTTP Integration Function
+// FIXED Claude HTTP Integration Function
 async function processWithClaude(response, items) {
   if (!process.env.ANTHROPIC_API_KEY) {
     console.log('❌ Anthropic API key not available');
@@ -155,30 +155,55 @@ async function processWithClaude(response, items) {
   try {
     console.log('🤖 Processing with Claude via HTTP...');
     
-    const prompt = `You are a household inventory assistant. Analyze this user response about their pantry items and determine what updates need to be made.
+    const prompt = `You are a household inventory assistant for new parents. Analyze this user response about their pantry items and determine what updates need to be made.
 
-Current inventory:
-${items.map(item => `- ${item.name} (${item.category}, lasts ${item.estimated_duration_days} days)`).join('\n')}
+CATEGORY MAPPINGS:
+- Baby: nappies, diapers, baby food, formula, baby wipes, dummy, pacifier, baby bottles
+- Pet: dog food, cat food, dog treats, dog chews, cat treats, pet food, bird seed
+- House: toilet roll, toilet paper, kitchen roll, bread, milk, eggs, washing powder, cleaning products, frozen peas, butter, cheese, rice, pasta, cereal
+- Health: vitamins, medicine, paracetamol, plasters, supplements
 
-User response: "${response}"
+CURRENT INVENTORY:
+${items.map(item => `- ID:${item.id} "${item.name}" (${item.category}, bought: ${item.last_purchased}, lasts ${item.estimated_duration_days} days)`).join('\n')}
 
-Analyze the response and return a JSON object with updates needed. For each item mentioned:
-- If they say it's "good for X weeks/days", calculate when they need to buy it next
-- If they say they're "nearly out" or "running low", they need it soon
-- If they mention ordering or buying items, update the purchase date
+USER INPUT: "${response}"
+
+INSTRUCTIONS:
+1. For NEW items mentioned that don't exist: Add them to newItems array
+2. For EXISTING items with updates: Add them to updates array  
+3. Parse durations: "1 week" = 7 days, "2 weeks" = 14 days, "1 month" = 30 days
+4. Parse purchase dates: "bought today" = today, "bought yesterday" = yesterday, "bought X days ago" = X days ago
+5. ALWAYS assign new items to appropriate categories from the mapping above
+6. If unsure about category, default to "House"
 
 Return ONLY valid JSON in this exact format:
 {
   "updates": [
     {
-      "itemName": "Dog food",
-      "daysUntilNeeded": 14,
-      "reason": "User said good for 2 weeks"
+      "itemId": 3,
+      "itemName": "Nappies", 
+      "newLastPurchased": "2025-07-21",
+      "newDurationDays": 14,
+      "reason": "User said bought yesterday, 2 weeks supply"
     }
   ],
-  "newItems": [],
+  "newItems": [
+    {
+      "itemName": "Bread",
+      "category": "House", 
+      "lastPurchased": "2025-07-21",
+      "durationDays": 7,
+      "reason": "User said bread, 1 week, bought today"
+    }
+  ],
   "removeItems": []
-}`;
+}
+
+IMPORTANT: 
+- Always create new items if they don't exist in current inventory
+- Be generous about adding items - users want to track everything
+- Match existing items by name similarity (case insensitive)
+- Today's date is: ${new Date().toISOString().split('T')[0]}`;
 
     const claudeResponse = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -223,6 +248,7 @@ Return ONLY valid JSON in this exact format:
       };
     } catch (parseError) {
       console.log('❌ Failed to parse Claude response as JSON:', parseError.message);
+      console.log('Raw Claude text:', claudeText);
       return { updates: [], newItems: [], removeItems: [] };
     }
 
@@ -285,17 +311,17 @@ app.delete('/api/items/:id', async (req, res) => {
 
 // Debug endpoint to test Claude HTTP integration
 app.post('/api/debug-claude', async (req, res) => {
-  const { response } = req.body;
+  const { userInput } = req.body;
   
   try {
     const result = await pool.query("SELECT * FROM items WHERE status = 'active'");
     const items = result.rows;
     
-    const claudeResponse = await processWithClaude(response, items);
+    const claudeResponse = await processWithClaude(userInput, items);
     
     res.json({
       success: true,
-      input: response,
+      input: userInput,
       claudeResponse: claudeResponse,
       timestamp: new Date().toISOString()
     });
@@ -347,67 +373,80 @@ app.post('/api/send-reminder', async (req, res) => {
   }
 });
 
-// Process natural language response
+// FIXED Process natural language response endpoint
 app.post('/api/process-response', async (req, res) => {
-  const { response } = req.body;
+  const { userInput } = req.body;
   
   try {
     const result = await pool.query("SELECT * FROM items WHERE status = 'active'");
     const items = result.rows;
     
-    const claudeResponse = await processWithClaude(response, items);
+    const claudeResponse = await processWithClaude(userInput, items);
     
     let updatesApplied = [];
     const today = new Date().toISOString().split('T')[0];
     
-    // Process updates
+    // Process updates to EXISTING items
     if (claudeResponse.updates && claudeResponse.updates.length > 0) {
       for (const update of claudeResponse.updates) {
-        const item = items.find(i => 
-          i.name.toLowerCase().includes(update.itemName.toLowerCase()) ||
-          update.itemName.toLowerCase().includes(i.name.toLowerCase())
-        );
-        
-        if (item) {
-          let newLastPurchased = item.last_purchased;
-          
-          if (update.daysUntilNeeded) {
-            // Calculate when they last purchased it based on when they need it
-            const targetDate = new Date();
-            targetDate.setDate(targetDate.getDate() + update.daysUntilNeeded);
-            const calculatedDate = new Date(targetDate);
-            calculatedDate.setDate(calculatedDate.getDate() - item.estimated_duration_days);
-            newLastPurchased = calculatedDate.toISOString().split('T')[0];
-          }
-          
+        if (update.itemId) {
+          // Update by ID (most reliable)
           await pool.query(
-            'UPDATE items SET last_purchased = $1 WHERE id = $2',
-            [newLastPurchased, item.id]
+            'UPDATE items SET last_purchased = $1, estimated_duration_days = $2 WHERE id = $3',
+            [update.newLastPurchased, update.newDurationDays, update.itemId]
+          );
+          updatesApplied.push(`Updated: ${update.itemName} - ${update.reason}`);
+        } else {
+          // Fallback: find by name similarity
+          const item = items.find(i => 
+            i.name.toLowerCase().includes(update.itemName.toLowerCase()) ||
+            update.itemName.toLowerCase().includes(i.name.toLowerCase())
           );
           
-          updatesApplied.push(`${item.name}: ${update.reason || 'timeline updated'}`);
+          if (item) {
+            await pool.query(
+              'UPDATE items SET last_purchased = $1, estimated_duration_days = $2 WHERE id = $3',
+              [update.newLastPurchased, update.newDurationDays, item.id]
+            );
+            updatesApplied.push(`Updated: ${item.name} - ${update.reason}`);
+          }
         }
       }
     }
     
-    // Add new items
+    // Add NEW items
     if (claudeResponse.newItems && claudeResponse.newItems.length > 0) {
       for (const newItem of claudeResponse.newItems) {
-        await pool.query(
-          'INSERT INTO items (name, category, last_purchased, estimated_duration_days) VALUES ($1, $2, $3, $4)',
-          [newItem.itemName, newItem.category || 'House', today, newItem.durationDays || 30]
+        const insertResult = await pool.query(
+          'INSERT INTO items (name, category, last_purchased, estimated_duration_days) VALUES ($1, $2, $3, $4) RETURNING *',
+          [newItem.itemName, newItem.category, newItem.lastPurchased, newItem.durationDays]
         );
-        updatesApplied.push(`Added: ${newItem.itemName}`);
+        updatesApplied.push(`Added: ${newItem.itemName} (${newItem.category}) - ${newItem.reason}`);
+      }
+    }
+    
+    // Remove items if requested
+    if (claudeResponse.removeItems && claudeResponse.removeItems.length > 0) {
+      for (const removeItem of claudeResponse.removeItems) {
+        await pool.query(
+          "UPDATE items SET status = 'deleted' WHERE name ILIKE $1",
+          [`%${removeItem.itemName}%`]
+        );
+        updatesApplied.push(`Removed: ${removeItem.itemName}`);
       }
     }
     
     res.json({
       message: 'Response processed successfully',
-      updatesApplied: updatesApplied
+      updatesApplied: updatesApplied,
+      claudeResponse: claudeResponse // Include for debugging
     });
   } catch (error) {
     console.error('Error processing response:', error);
-    res.status(500).json({ error: 'Failed to process response' });
+    res.status(500).json({ 
+      error: 'Failed to process response',
+      details: error.message 
+    });
   }
 });
 
