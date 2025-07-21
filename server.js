@@ -126,7 +126,7 @@ const generateReminderEmail = (lowItems) => {
   emailContent += "Think you might be running low on:\n\n";
   
   Object.entries(groupedItems).forEach(([category, categoryItems]) => {
-    const icon = category === 'House' ? '🏠' : category === 'Baby' ? '👶' : '🐕';
+    const icon = category === 'House' ? '🏠' : category === 'Baby' ? '👶' : category === 'Food' ? '🍞' : '🐕';
     emailContent += `${icon} ${category}: ${categoryItems.map(item => item.name).join(', ')}\n`;
   });
   
@@ -145,7 +145,7 @@ const generateReminderSMS = (lowItems) => {
   return `Paul's Pantry: Low on ${itemNames}. Reply with status!`;
 };
 
-// FIXED Claude HTTP Integration Function
+// ULTRA AGGRESSIVE Claude HTTP Integration Function
 async function processWithClaude(response, items) {
   if (!process.env.ANTHROPIC_API_KEY) {
     console.log('❌ Anthropic API key not available');
@@ -155,55 +155,61 @@ async function processWithClaude(response, items) {
   try {
     console.log('🤖 Processing with Claude via HTTP...');
     
-    const prompt = `You are a household inventory assistant for new parents. Analyze this user response about their pantry items and determine what updates need to be made.
-
-CATEGORY MAPPINGS:
-- Baby: nappies, diapers, baby food, formula, baby wipes, dummy, pacifier, baby bottles
-- Pet: dog food, cat food, dog treats, dog chews, cat treats, pet food, bird seed
-- House: toilet roll, toilet paper, kitchen roll, bread, milk, eggs, washing powder, cleaning products, frozen peas, butter, cheese, rice, pasta, cereal
-- Health: vitamins, medicine, paracetamol, plasters, supplements
+    const prompt = `You are a household inventory assistant. You MUST create entries for ANY items mentioned by users.
 
 CURRENT INVENTORY:
-${items.map(item => `- ID:${item.id} "${item.name}" (${item.category}, bought: ${item.last_purchased}, lasts ${item.estimated_duration_days} days)`).join('\n')}
+${items.map(item => `- ID:${item.id} "${item.name}" (${item.category})`).join('\n')}
 
-USER INPUT: "${response}"
+USER SAID: "${response}"
 
-INSTRUCTIONS:
-1. For NEW items mentioned that don't exist: Add them to newItems array
-2. For EXISTING items with updates: Add them to updates array  
-3. Parse durations: "1 week" = 7 days, "2 weeks" = 14 days, "1 month" = 30 days
-4. Parse purchase dates: "bought today" = today, "bought yesterday" = yesterday, "bought X days ago" = X days ago
-5. ALWAYS assign new items to appropriate categories from the mapping above
-6. If unsure about category, default to "House"
+CATEGORY RULES:
+- Food: bread, milk, eggs, cheese, butter, rice, pasta, cereal, frozen peas, fruit, vegetables
+- Baby: nappies, diapers, baby food, formula, baby wipes, dummy, pacifier, baby bottles
+- Pet: dog food, cat food, dog treats, dog chews, pet supplies, bird seed
+- House: toilet roll, washing powder, cleaning products, bin bags, kitchen roll
+- Health: vitamins, medicine, paracetamol, plasters, supplements
 
-Return ONLY valid JSON in this exact format:
+PARSING RULES:
+1. If user mentions ANY item not in current inventory - CREATE IT in newItems
+2. If user mentions an existing item - UPDATE IT in updates array
+3. Parse "1 week" = 7 days, "2 weeks" = 14 days, "1 month" = 30 days
+4. Parse "today" = ${new Date().toISOString().split('T')[0]}
+5. Parse "yesterday" = ${new Date(Date.now() - 86400000).toISOString().split('T')[0]}
+6. Parse "bought X days ago" = subtract X days from today
+
+EXAMPLES:
+- "bread, 1 week, bought today" = CREATE bread in Food category, 7 days duration, purchased today
+- "milk, 1 week" = CREATE milk in Food category, 7 days duration
+- "nappies, 2 weeks, bought yesterday" = UPDATE existing nappies (ID:3)
+- "dog treats" = CREATE dog treats in Pet category
+
+You MUST return ONLY valid JSON. NO explanations, NO markdown, NO extra text:
+
 {
   "updates": [
     {
       "itemId": 3,
-      "itemName": "Nappies", 
-      "newLastPurchased": "2025-07-21",
+      "itemName": "Nappies",
+      "newLastPurchased": "2025-07-20",
       "newDurationDays": 14,
-      "reason": "User said bought yesterday, 2 weeks supply"
+      "reason": "User updated timeline"
     }
   ],
   "newItems": [
     {
       "itemName": "Bread",
-      "category": "House", 
+      "category": "Food", 
       "lastPurchased": "2025-07-21",
       "durationDays": 7,
-      "reason": "User said bread, 1 week, bought today"
+      "reason": "User mentioned new item"
     }
   ],
   "removeItems": []
 }
 
-IMPORTANT: 
-- Always create new items if they don't exist in current inventory
-- Be generous about adding items - users want to track everything
-- Match existing items by name similarity (case insensitive)
-- Today's date is: ${new Date().toISOString().split('T')[0]}`;
+BE AGGRESSIVE - CREATE ANY ITEMS THE USER MENTIONS!`;
+
+    console.log('📤 Sending prompt to Claude...');
 
     const claudeResponse = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -227,7 +233,7 @@ IMPORTANT:
     console.log('✅ Claude HTTP response received');
     
     const claudeText = result.content[0].text;
-    console.log('Claude response:', claudeText);
+    console.log('🔍 Full Claude response:', claudeText);
     
     // Clean and parse JSON response
     let cleanedText = claudeText.trim();
@@ -240,7 +246,7 @@ IMPORTANT:
     
     try {
       const analysis = JSON.parse(cleanedText);
-      console.log('✅ Claude HTTP integration working!', analysis);
+      console.log('✅ Parsed Claude response:', analysis);
       return {
         updates: analysis.updates || [],
         newItems: analysis.newItems || [],
@@ -248,7 +254,7 @@ IMPORTANT:
       };
     } catch (parseError) {
       console.log('❌ Failed to parse Claude response as JSON:', parseError.message);
-      console.log('Raw Claude text:', claudeText);
+      console.log('❌ Raw Claude text:', claudeText);
       return { updates: [], newItems: [], removeItems: [] };
     }
 
