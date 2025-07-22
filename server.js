@@ -511,7 +511,7 @@ app.post('/webhook/email-reply', (req, res) => {
   }
 });
 
-// SMS webhook with robust item isolation
+// SMS webhook with detailed database debug logging
 app.post('/webhook/sms-reply', async (req, res) => {
   try {
     const { Body, From } = req.body;
@@ -521,55 +521,100 @@ app.post('/webhook/sms-reply', async (req, res) => {
     const result = await pool.query("SELECT * FROM items WHERE status = 'active'");
     const items = result.rows;
     
-    // Process with Claude (now with strict item isolation)
+    // Process with Claude
     const claudeResponse = await processWithClaude(Body, items);
     
     let updatesApplied = [];
     
-    // Process updates to EXISTING items
+    // Process updates to EXISTING items with detailed logging
     if (claudeResponse.updates && claudeResponse.updates.length > 0) {
       for (const update of claudeResponse.updates) {
         if (update.itemId) {
-          await pool.query(
-            'UPDATE items SET last_purchased = $1, estimated_duration_days = $2 WHERE id = $3',
-            [update.newLastPurchased, update.newDurationDays, update.itemId]
-          );
-          updatesApplied.push(`${update.itemName} updated`);
-          console.log('📱 Updated:', update.itemName);
+          console.log('📱 Attempting database UPDATE for itemId:', update.itemId);
+          console.log('📱 UPDATE values:', {
+            lastPurchased: update.newLastPurchased,
+            durationDays: update.newDurationDays,
+            itemId: update.itemId
+          });
           
-          // TODO: Log confidence score for this update
+          try {
+            const updateResult = await pool.query(
+              'UPDATE items SET last_purchased = $1, estimated_duration_days = $2 WHERE id = $3 RETURNING *',
+              [update.newLastPurchased, update.newDurationDays, update.itemId]
+            );
+            
+            console.log('📱 UPDATE result:', updateResult.rows);
+            
+            if (updateResult.rows.length > 0) {
+              updatesApplied.push(`${update.itemName} updated`);
+              console.log('📱 ✅ Successfully updated:', update.itemName);
+            } else {
+              console.log('📱 ❌ UPDATE affected 0 rows for itemId:', update.itemId);
+            }
+          } catch (updateError) {
+            console.error('📱 ❌ Database UPDATE error:', updateError);
+          }
         }
       }
     }
     
-    // Add NEW items
+    // Add NEW items with detailed logging
     if (claudeResponse.newItems && claudeResponse.newItems.length > 0) {
       for (const newItem of claudeResponse.newItems) {
-        await pool.query(
-          'INSERT INTO items (name, category, last_purchased, estimated_duration_days) VALUES ($1, $2, $3, $4)',
-          [newItem.itemName, newItem.category, newItem.lastPurchased, newItem.durationDays]
-        );
-        updatesApplied.push(`Added ${newItem.itemName}`);
-        console.log('📱 Added:', newItem.itemName);
+        console.log('📱 Attempting database INSERT for:', newItem.itemName);
+        console.log('📱 INSERT values:', {
+          name: newItem.itemName,
+          category: newItem.category,
+          lastPurchased: newItem.lastPurchased,
+          durationDays: newItem.durationDays
+        });
         
-        // TODO: Add user confirmation for ambiguous new items
+        try {
+          const insertResult = await pool.query(
+            'INSERT INTO items (name, category, last_purchased, estimated_duration_days) VALUES ($1, $2, $3, $4) RETURNING *',
+            [newItem.itemName, newItem.category, newItem.lastPurchased, newItem.durationDays]
+          );
+          
+          console.log('📱 INSERT result:', insertResult.rows);
+          
+          if (insertResult.rows.length > 0) {
+            updatesApplied.push(`Added ${newItem.itemName}`);
+            console.log('📱 ✅ Successfully inserted:', newItem.itemName, 'with ID:', insertResult.rows[0].id);
+          } else {
+            console.log('📱 ❌ INSERT returned no rows for:', newItem.itemName);
+          }
+        } catch (insertError) {
+          console.error('📱 ❌ Database INSERT error:', insertError);
+        }
       }
     }
     
-    // Remove items
+    // Remove items with detailed logging
     if (claudeResponse.removeItems && claudeResponse.removeItems.length > 0) {
       for (const removeItem of claudeResponse.removeItems) {
-        await pool.query(
-          "UPDATE items SET status = 'deleted' WHERE name ILIKE $1",
-          [`%${removeItem.itemName}%`]
-        );
-        updatesApplied.push(`Removed ${removeItem.itemName}`);
+        console.log('📱 Attempting database DELETE for:', removeItem.itemName);
         
-        // TODO: Add soft delete with recovery option
+        try {
+          const deleteResult = await pool.query(
+            "UPDATE items SET status = 'deleted' WHERE name ILIKE $1 RETURNING *",
+            [`%${removeItem.itemName}%`]
+          );
+          
+          console.log('📱 DELETE result:', deleteResult.rows);
+          
+          if (deleteResult.rows.length > 0) {
+            updatesApplied.push(`Removed ${removeItem.itemName}`);
+            console.log('📱 ✅ Successfully removed:', removeItem.itemName);
+          } else {
+            console.log('📱 ❌ DELETE affected 0 rows for:', removeItem.itemName);
+          }
+        } catch (deleteError) {
+          console.error('📱 ❌ Database DELETE error:', deleteError);
+        }
       }
     }
     
-    console.log('📱 Updates applied:', updatesApplied);
+    console.log('📱 Final updates applied:', updatesApplied);
     
     // Send confirmation SMS
     if (updatesApplied.length > 0 && process.env.TWILIO_PHONE_NUMBER) {
@@ -582,7 +627,7 @@ app.post('/webhook/sms-reply', async (req, res) => {
     
     res.status(200).send('<Response></Response>');
   } catch (error) {
-    console.error('Error processing SMS webhook:', error);
+    console.error('❌ SMS webhook error:', error);
     res.status(500).send('Error');
   }
 });
