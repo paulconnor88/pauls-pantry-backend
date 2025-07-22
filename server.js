@@ -146,7 +146,7 @@ const generateReminderSMS = (lowItems) => {
   return `Paul's Pantry: Low on ${itemNames}. Reply with status!`;
 };
 
-// OPTIMIZED Claude HTTP Integration - Handles natural language + precise item matching
+// ROBUST Claude HTTP Integration - Prevents cross-item contamination
 async function processWithClaude(response, items) {
   if (!process.env.ANTHROPIC_API_KEY) {
     console.log('❌ Anthropic API key not available');
@@ -156,79 +156,96 @@ async function processWithClaude(response, items) {
   try {
     console.log('🤖 Processing with Claude via HTTP...');
     
-    const prompt = `You are a household inventory assistant. Parse natural language about household items.
+    const prompt = `You are a household inventory assistant. Parse natural language with strict item isolation.
 
 CURRENT INVENTORY:
 ${items.map(item => `- ID:${item.id} "${item.name}" (${item.category})`).join('\n')}
 
 USER SAID: "${response}"
 
-ITEM MATCHING LOGIC:
-1. ONLY update items that the user explicitly mentions by name OR obvious synonyms
-   - "washing up liquid" = "fairy liquid" = "dish soap" (same item)
-   - "toilet paper" = "toilet roll" (same item)
-   - "milk" ≠ "washing powder" (completely different items)
-   - "dog food" ≠ "dog treats" (different items)
+CRITICAL RULES - STRICT ITEM ISOLATION:
+1. ONLY update items explicitly mentioned by exact name or true synonyms
+2. NEVER update items based on context, category, or association
+3. Each mentioned item gets isolated processing - no cross-contamination
 
-2. If user mentions item name or clear synonym → UPDATE that item
-3. If user mentions completely new item → CREATE NEW item  
-4. NEVER update items from different categories or unrelated items
-5. When uncertain if items are related → CREATE NEW item instead
+EXACT SYNONYMS ONLY (treat as same item):
+- "washing up liquid" = "fairy liquid" = "dish soap" 
+- "toilet paper" = "toilet roll" = "loo roll"
+- "washing powder" = "laundry detergent"
+- "nappies" = "diapers"
 
-CATEGORY BOUNDARIES - Items from different categories are NEVER the same:
-- Food items (milk, bread) ≠ House items (washing powder, toilet roll)
-- Pet items (dog food) ≠ Baby items (nappies)
-- Only match items within the same category AND with similar names
+NOT SYNONYMS (always separate items):
+- "baby wipes" ≠ "nappies" (different baby items)
+- "dog food" ≠ "dog treats" (different pet items)  
+- "milk" ≠ "cheese" (different food items)
+- "shampoo" ≠ "soap" (different house items)
 
-CATEGORIES:
+MULTI-ITEM PROCESSING:
+- "Dog food good for 2 weeks, nappies nearly out" → Process separately, no shared context
+- Each item mentioned = one isolated operation
+- Information about item A never affects item B
+
+CONTEXT BOUNDARIES:
+- "Buy baby wipes today. They last 1 week per pack" → ONLY affects baby wipes, not nappies or other baby items
+- "Milk every 7 days" → ONLY affects milk, not washing powder or any other items
+- Pronouns ("it", "they") refer ONLY to the immediately mentioned item
+
+CATEGORIES (for new items only):
 - Food: milk, bread, eggs, cheese, butter, rice, pasta, cereal, fruit, vegetables
-- Baby: nappies, diapers, baby food, formula, baby wipes, dummy, pacifier, baby bottles
+- Baby: nappies, diapers, baby food, formula, baby wipes, dummy, pacifier
 - Pet: dog food, cat food, dog treats, dog chews, pet supplies, bird seed, cat litter
-- House: toilet roll, washing powder, cleaning products, bin bags, kitchen roll, soap
+- House: toilet roll, washing powder, cleaning products, bin bags, kitchen roll, soap, shampoo
 - Health: vitamins, medicine, paracetamol, plasters, supplements
 
 TIME PARSING:
 - "today" / "now" = ${new Date().toISOString().split('T')[0]}
 - "yesterday" = ${new Date(Date.now() - 86400000).toISOString().split('T')[0]}
 - "tomorrow" = ${new Date(Date.now() + 86400000).toISOString().split('T')[0]}
-- "2 weeks" = 14 days, "1 month" = 30 days, "6 weeks" = 42 days
+- "1 week" = 7 days, "2 weeks" = 14 days, "1 month" = 30 days
 
-RESPONSE FORMAT - Use these EXACT field names:
+DECISION LOGIC:
+1. Extract ONLY items explicitly mentioned by name
+2. For each mentioned item:
+   - If exact match or true synonym in inventory → UPDATE that specific item
+   - If no match in inventory → CREATE NEW item
+3. NEVER update items that weren't mentioned
+4. When uncertain about synonyms → CREATE NEW item instead
+
+RESPONSE FORMAT:
 {
   "updates": [
     {
       "itemId": 1,
       "itemName": "Dog food",
       "newLastPurchased": "2025-07-22",
-      "newDurationDays": 90,
-      "reason": "User said good for 2 weeks"
+      "newDurationDays": 14,
+      "reason": "User said dog food good for 2 weeks"
     }
   ],
   "newItems": [
     {
-      "itemName": "Dog treats",
-      "category": "Pet",
+      "itemName": "Baby wipes",
+      "category": "Baby",
       "lastPurchased": "2025-07-22",
-      "durationDays": 30,
-      "reason": "User mentioned new item not in inventory"
+      "durationDays": 7,
+      "reason": "User mentioned baby wipes not in inventory"
     }
   ],
-  "removeItems": [
-    {
-      "itemName": "Formula",
-      "reason": "User said don't need anymore"
-    }
-  ]
+  "removeItems": []
 }
 
 EXAMPLES:
-- "Fairy liquid" (inventory has "Washing up liquid") → updates: [{"itemId": 2, "reason": "Same item, different name"}]
-- "Dog food good for 2 weeks" (inventory has "Dog food") → updates: [{"itemId": 1, "newDurationDays": 14}]
-- "Get milk" (no milk in inventory) → newItems: [{"itemName": "Milk", "category": "Food"}]
+- "Baby wipes last 1 week" → newItems: [Baby wipes], NO updates to nappies
+- "Dog food good for 2 weeks" → updates: [Dog food ID], NO updates to dog treats
+- "Milk every 7 days, bread nearly out" → Process milk separately from bread
 
-Be flexible with natural language AND flexible with item matching. When in doubt, UPDATE existing similar item rather than create duplicate.
+FUTURE ENHANCEMENT MARKERS:
+<!-- TODO: Add confidence scoring for uncertain matches -->
+<!-- TODO: Add undo capability for incorrect updates -->
+<!-- TODO: Support quantity tracking (packs, bottles, etc) -->
+<!-- TODO: Add multi-location support (kitchen, bathroom, etc) -->
 
-Return ONLY valid JSON with NO explanations.`;
+Return ONLY valid JSON. Be extremely strict about item isolation.`;
 
     console.log('📤 Sending prompt to Claude...');
 
@@ -423,7 +440,7 @@ app.post('/api/process-response', async (req, res) => {
           );
           updatesApplied.push(`Updated: ${update.itemName} - ${update.reason}`);
         } else if (update.itemName) {
-          // Fallback: find by name similarity
+          // Fallback: find by name similarity (should be rare with new logic)
           const item = items.find(i => 
             i.name.toLowerCase().includes(update.itemName.toLowerCase()) ||
             update.itemName.toLowerCase().includes(i.name.toLowerCase())
@@ -448,6 +465,9 @@ app.post('/api/process-response', async (req, res) => {
           [newItem.itemName, newItem.category, newItem.lastPurchased, newItem.durationDays]
         );
         updatesApplied.push(`Added: ${newItem.itemName} (${newItem.category}) - ${newItem.reason}`);
+        
+        // TODO: Add confidence scoring for new items
+        // TODO: Add undo tracking for this operation
       }
     }
     
@@ -459,6 +479,8 @@ app.post('/api/process-response', async (req, res) => {
           [`%${removeItem.itemName}%`]
         );
         updatesApplied.push(`Removed: ${removeItem.itemName}`);
+        
+        // TODO: Add soft delete with undo capability
       }
     }
     
@@ -489,7 +511,7 @@ app.post('/webhook/email-reply', (req, res) => {
   }
 });
 
-// SMS webhook with consistent Claude response handling
+// SMS webhook with robust item isolation
 app.post('/webhook/sms-reply', async (req, res) => {
   try {
     const { Body, From } = req.body;
@@ -499,7 +521,7 @@ app.post('/webhook/sms-reply', async (req, res) => {
     const result = await pool.query("SELECT * FROM items WHERE status = 'active'");
     const items = result.rows;
     
-    // Process with Claude
+    // Process with Claude (now with strict item isolation)
     const claudeResponse = await processWithClaude(Body, items);
     
     let updatesApplied = [];
@@ -514,6 +536,8 @@ app.post('/webhook/sms-reply', async (req, res) => {
           );
           updatesApplied.push(`${update.itemName} updated`);
           console.log('📱 Updated:', update.itemName);
+          
+          // TODO: Log confidence score for this update
         }
       }
     }
@@ -527,6 +551,8 @@ app.post('/webhook/sms-reply', async (req, res) => {
         );
         updatesApplied.push(`Added ${newItem.itemName}`);
         console.log('📱 Added:', newItem.itemName);
+        
+        // TODO: Add user confirmation for ambiguous new items
       }
     }
     
@@ -538,6 +564,8 @@ app.post('/webhook/sms-reply', async (req, res) => {
           [`%${removeItem.itemName}%`]
         );
         updatesApplied.push(`Removed ${removeItem.itemName}`);
+        
+        // TODO: Add soft delete with recovery option
       }
     }
     
