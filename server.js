@@ -36,7 +36,7 @@ const PORT = process.env.PORT || 3001;
 // Middleware
 app.use(cors());
 app.use(express.json());
-app.use(express.urlencoded({ extended: true })); // FIXED: Added for Twilio webhooks
+app.use(express.urlencoded({ extended: true })); // For Twilio webhooks
 app.use(express.raw({ type: 'text/plain' }));
 
 // Email configuration
@@ -146,7 +146,7 @@ const generateReminderSMS = (lowItems) => {
   return `Paul's Pantry: Low on ${itemNames}. Reply with status!`;
 };
 
-// Claude HTTP Integration Function
+// OPTIMIZED Claude HTTP Integration - Handles natural language + precise item matching
 async function processWithClaude(response, items) {
   if (!process.env.ANTHROPIC_API_KEY) {
     console.log('❌ Anthropic API key not available');
@@ -156,45 +156,76 @@ async function processWithClaude(response, items) {
   try {
     console.log('🤖 Processing with Claude via HTTP...');
     
-    const prompt = `You are a household inventory assistant. You MUST ONLY process items that the user explicitly mentions.
+    const prompt = `You are a household inventory assistant. Parse natural language about household items.
 
 CURRENT INVENTORY:
 ${items.map(item => `- ID:${item.id} "${item.name}" (${item.category})`).join('\n')}
 
 USER SAID: "${response}"
 
-CATEGORY RULES:
-- Food: bread, milk, eggs, cheese, butter, rice, pasta, cereal, frozen peas, fruit, vegetables
+ITEM MATCHING LOGIC:
+1. If user mentions an item that's clearly the SAME as existing item → UPDATE
+   - "fairy liquid" = "washing up liquid" = "dish soap" (same item)
+   - "toilet paper" = "toilet roll" (same item) 
+   - "washing powder" = "laundry detergent" (same item)
+   - "dog food" mentioned when "dog food" exists → UPDATE existing
+
+2. If user mentions item that doesn't exist in inventory → CREATE NEW
+   - "milk" mentioned but no milk in inventory → ADD new "milk"
+
+3. When in doubt about similarity → FAVOR UPDATING existing item
+   - Better to update wrong item than create duplicate items
+   - User can correct later if needed
+
+CATEGORIES:
+- Food: milk, bread, eggs, cheese, butter, rice, pasta, cereal, fruit, vegetables
 - Baby: nappies, diapers, baby food, formula, baby wipes, dummy, pacifier, baby bottles
-- Pet: dog food, cat food, dog treats, dog chews, pet supplies, bird seed
-- House: toilet roll, washing powder, cleaning products, bin bags, kitchen roll
+- Pet: dog food, cat food, dog treats, dog chews, pet supplies, bird seed, cat litter
+- House: toilet roll, washing powder, cleaning products, bin bags, kitchen roll, soap
 - Health: vitamins, medicine, paracetamol, plasters, supplements
 
-PARSING RULES:
-1. ONLY process items the user explicitly mentions in their input
-2. If user mentions an item NOT in current inventory - CREATE IT in newItems
-3. If user mentions an item that EXISTS in inventory - UPDATE IT in updates array
-4. Parse "1 week" = 7 days, "2 weeks" = 14 days, "1 month" = 30 days
-5. Parse "today" = ${new Date().toISOString().split('T')[0]}
-6. Parse "yesterday" = ${new Date(Date.now() - 86400000).toISOString().split('T')[0]}
+TIME PARSING:
+- "today" / "now" = ${new Date().toISOString().split('T')[0]}
+- "yesterday" = ${new Date(Date.now() - 86400000).toISOString().split('T')[0]}
+- "tomorrow" = ${new Date(Date.now() + 86400000).toISOString().split('T')[0]}
+- "2 weeks" = 14 days, "1 month" = 30 days, "6 weeks" = 42 days
 
-CRITICAL: Do NOT make up updates for items the user didn't mention. Only process what they actually said.
-
-Return ONLY valid JSON with NO explanations:
-
+RESPONSE FORMAT - Use these EXACT field names:
 {
-  "updates": [],
-  "newItems": [
+  "updates": [
     {
-      "itemName": "Bread",
-      "category": "Food", 
-      "lastPurchased": "2025-07-21",
-      "durationDays": 7,
-      "reason": "User mentioned new item"
+      "itemId": 1,
+      "itemName": "Dog food",
+      "newLastPurchased": "2025-07-22",
+      "newDurationDays": 90,
+      "reason": "User said good for 2 weeks"
     }
   ],
-  "removeItems": []
-}`;
+  "newItems": [
+    {
+      "itemName": "Dog treats",
+      "category": "Pet",
+      "lastPurchased": "2025-07-22",
+      "durationDays": 30,
+      "reason": "User mentioned new item not in inventory"
+    }
+  ],
+  "removeItems": [
+    {
+      "itemName": "Formula",
+      "reason": "User said don't need anymore"
+    }
+  ]
+}
+
+EXAMPLES:
+- "Fairy liquid" (inventory has "Washing up liquid") → updates: [{"itemId": 2, "reason": "Same item, different name"}]
+- "Dog food good for 2 weeks" (inventory has "Dog food") → updates: [{"itemId": 1, "newDurationDays": 14}]
+- "Get milk" (no milk in inventory) → newItems: [{"itemName": "Milk", "category": "Food"}]
+
+Be flexible with natural language AND flexible with item matching. When in doubt, UPDATE existing similar item rather than create duplicate.
+
+Return ONLY valid JSON with NO explanations.`;
 
     console.log('📤 Sending prompt to Claude...');
 
@@ -377,7 +408,6 @@ app.post('/api/process-response', async (req, res) => {
     const claudeResponse = await processWithClaude(userInput, items);
     
     let updatesApplied = [];
-    const today = new Date().toISOString().split('T')[0];
     
     // Process updates to EXISTING items
     if (claudeResponse.updates && claudeResponse.updates.length > 0) {
@@ -389,7 +419,7 @@ app.post('/api/process-response', async (req, res) => {
             [update.newLastPurchased, update.newDurationDays, update.itemId]
           );
           updatesApplied.push(`Updated: ${update.itemName} - ${update.reason}`);
-        } else {
+        } else if (update.itemName) {
           // Fallback: find by name similarity
           const item = items.find(i => 
             i.name.toLowerCase().includes(update.itemName.toLowerCase()) ||
@@ -456,7 +486,7 @@ app.post('/webhook/email-reply', (req, res) => {
   }
 });
 
-// FIXED: SMS webhook with proper error handling
+// SMS webhook with consistent Claude response handling
 app.post('/webhook/sms-reply', async (req, res) => {
   try {
     const { Body, From } = req.body;
@@ -470,32 +500,17 @@ app.post('/webhook/sms-reply', async (req, res) => {
     const claudeResponse = await processWithClaude(Body, items);
     
     let updatesApplied = [];
-    const today = new Date().toISOString().split('T')[0];
     
-    // Process updates to EXISTING items (same logic as /api/process-response)
+    // Process updates to EXISTING items
     if (claudeResponse.updates && claudeResponse.updates.length > 0) {
       for (const update of claudeResponse.updates) {
         if (update.itemId) {
-          // Update by ID (most reliable)
           await pool.query(
             'UPDATE items SET last_purchased = $1, estimated_duration_days = $2 WHERE id = $3',
             [update.newLastPurchased, update.newDurationDays, update.itemId]
           );
-          updatesApplied.push(`Updated: ${update.itemName} - ${update.reason}`);
-        } else if (update.itemName) {
-          // Fallback: find by name similarity (with safe null check)
-          const item = items.find(i => 
-            i.name.toLowerCase().includes(update.itemName.toLowerCase()) ||
-            update.itemName.toLowerCase().includes(i.name.toLowerCase())
-          );
-          
-          if (item) {
-            await pool.query(
-              'UPDATE items SET last_purchased = $1, estimated_duration_days = $2 WHERE id = $3',
-              [update.newLastPurchased, update.newDurationDays, item.id]
-            );
-            updatesApplied.push(`Updated: ${item.name} - ${update.reason}`);
-          }
+          updatesApplied.push(`${update.itemName} updated`);
+          console.log('📱 Updated:', update.itemName);
         }
       }
     }
@@ -503,35 +518,38 @@ app.post('/webhook/sms-reply', async (req, res) => {
     // Add NEW items
     if (claudeResponse.newItems && claudeResponse.newItems.length > 0) {
       for (const newItem of claudeResponse.newItems) {
-        const insertResult = await pool.query(
-          'INSERT INTO items (name, category, last_purchased, estimated_duration_days) VALUES ($1, $2, $3, $4) RETURNING *',
+        await pool.query(
+          'INSERT INTO items (name, category, last_purchased, estimated_duration_days) VALUES ($1, $2, $3, $4)',
           [newItem.itemName, newItem.category, newItem.lastPurchased, newItem.durationDays]
         );
-        updatesApplied.push(`Added: ${newItem.itemName} (${newItem.category})`);
+        updatesApplied.push(`Added ${newItem.itemName}`);
+        console.log('📱 Added:', newItem.itemName);
       }
     }
     
-    // Remove items if requested
+    // Remove items
     if (claudeResponse.removeItems && claudeResponse.removeItems.length > 0) {
       for (const removeItem of claudeResponse.removeItems) {
         await pool.query(
           "UPDATE items SET status = 'deleted' WHERE name ILIKE $1",
           [`%${removeItem.itemName}%`]
         );
-        updatesApplied.push(`Removed: ${removeItem.itemName}`);
+        updatesApplied.push(`Removed ${removeItem.itemName}`);
       }
     }
     
-    // Send confirmation SMS if updates were made
+    console.log('📱 Updates applied:', updatesApplied);
+    
+    // Send confirmation SMS
     if (updatesApplied.length > 0 && process.env.TWILIO_PHONE_NUMBER) {
-      const confirmationMsg = `✅ Updated: ${updatesApplied.join(', ')}`;
+      const confirmationMsg = `✅ ${updatesApplied.join(', ')}`;
       console.log('📱 Sending confirmation:', confirmationMsg);
       await twilioSendSMS(From, confirmationMsg);
     } else {
       console.log('📱 No updates applied or no Twilio phone configured');
     }
     
-    res.status(200).send('<Response></Response>'); // TwiML response
+    res.status(200).send('<Response></Response>');
   } catch (error) {
     console.error('Error processing SMS webhook:', error);
     res.status(500).send('Error');
