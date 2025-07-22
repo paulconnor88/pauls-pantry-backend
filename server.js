@@ -105,6 +105,9 @@ initializeDatabase();
 const getItemsRunningLow = (items) => {
   const today = new Date();
   return items.filter(item => {
+    // Skip one-off items (null duration)
+    if (!item.estimated_duration_days) return false;
+    
     const lastPurchased = new Date(item.last_purchased);
     const nextPurchaseDate = new Date(lastPurchased);
     nextPurchaseDate.setDate(lastPurchased.getDate() + item.estimated_duration_days);
@@ -146,7 +149,7 @@ const generateReminderSMS = (lowItems) => {
   return `Paul's Pantry: Low on ${itemNames}. Reply with status!`;
 };
 
-// ROBUST Claude HTTP Integration - Prevents cross-item contamination
+// ENHANCED Claude HTTP Integration - Handles recurring items + one-off shopping list
 async function processWithClaude(response, items) {
   if (!process.env.ANTHROPIC_API_KEY) {
     console.log('❌ Anthropic API key not available');
@@ -159,43 +162,37 @@ async function processWithClaude(response, items) {
     const prompt = `You are a household inventory assistant. Parse natural language with strict item isolation.
 
 CURRENT INVENTORY:
-${items.map(item => `- ID:${item.id} "${item.name}" (${item.category})`).join('\n')}
+${items.map(item => `- ID:${item.id} "${item.name}" (${item.category}) - duration: ${item.estimated_duration_days || 'one-off'} days`).join('\n')}
 
 USER SAID: "${response}"
 
-CRITICAL RULES - STRICT ITEM ISOLATION:
-1. ONLY update items explicitly mentioned by exact name or true synonyms
-2. NEVER update items based on context, category, or association
-3. Each mentioned item gets isolated processing - no cross-contamination
+CRITICAL LOGIC - OPTION A:
+1. If user mentions an item that EXISTS in inventory → UPDATE that existing item with today's date
+2. If user mentions an item that DOESN'T EXIST → CREATE new item
 
-EXACT SYNONYMS ONLY (treat as same item):
-- "washing up liquid" = "fairy liquid" = "dish soap" 
+ITEM TYPES:
+- RECURRING ITEMS: Have duration tracking (dog food, milk, toilet roll)
+- ONE-OFF ITEMS: No duration tracking (birthday candles, pasta for tonight)
+
+DECISION FLOW:
+1. Extract items mentioned by user
+2. For each item:
+   - CHECK: Does exact item exist in inventory?
+   - IF YES → UPDATE existing item (reset timeline with today's date, keep existing duration)
+   - IF NO → CREATE new item (determine if recurring or one-off based on context)
+
+CONTEXT ANALYSIS FOR NEW ITEMS:
+- "dog food good for 3 weeks" → RECURRING (durationDays: 21)
+- "milk every 7 days" → RECURRING (durationDays: 7)  
+- "pasta" → ONE-OFF (durationDays: null)
+- "birthday candles" → ONE-OFF (durationDays: null)
+- "batteries" → ONE-OFF (durationDays: null)
+
+EXACT SYNONYMS (treat as same item):
+- "washing up liquid" = "fairy liquid" = "dish soap"
 - "toilet paper" = "toilet roll" = "loo roll"
 - "washing powder" = "laundry detergent"
 - "nappies" = "diapers"
-
-NOT SYNONYMS (always separate items):
-- "baby wipes" ≠ "nappies" (different baby items)
-- "dog food" ≠ "dog treats" (different pet items)  
-- "milk" ≠ "cheese" (different food items)
-- "shampoo" ≠ "soap" (different house items)
-
-MULTI-ITEM PROCESSING:
-- "Dog food good for 2 weeks, nappies nearly out" → Process separately, no shared context
-- Each item mentioned = one isolated operation
-- Information about item A never affects item B
-
-CONTEXT BOUNDARIES:
-- "Buy baby wipes today. They last 1 week per pack" → ONLY affects baby wipes, not nappies or other baby items
-- "Milk every 7 days" → ONLY affects milk, not washing powder or any other items
-- Pronouns ("it", "they") refer ONLY to the immediately mentioned item
-
-CATEGORIES (for new items only):
-- Food: milk, bread, eggs, cheese, butter, rice, pasta, cereal, fruit, vegetables
-- Baby: nappies, diapers, baby food, formula, baby wipes, dummy, pacifier
-- Pet: dog food, cat food, dog treats, dog chews, pet supplies, bird seed, cat litter
-- House: toilet roll, washing powder, cleaning products, bin bags, kitchen roll, soap, shampoo
-- Health: vitamins, medicine, paracetamol, plasters, supplements
 
 TIME PARSING:
 - "today" / "now" = ${new Date().toISOString().split('T')[0]}
@@ -203,13 +200,12 @@ TIME PARSING:
 - "tomorrow" = ${new Date(Date.now() + 86400000).toISOString().split('T')[0]}
 - "1 week" = 7 days, "2 weeks" = 14 days, "1 month" = 30 days
 
-DECISION LOGIC:
-1. Extract ONLY items explicitly mentioned by name
-2. For each mentioned item:
-   - If exact match or true synonym in inventory → UPDATE that specific item
-   - If no match in inventory → CREATE NEW item
-3. NEVER update items that weren't mentioned
-4. When uncertain about synonyms → CREATE NEW item instead
+CATEGORIES (for new items):
+- Food: milk, bread, eggs, cheese, butter, rice, pasta, cereal, fruit, vegetables
+- Baby: nappies, diapers, baby food, formula, baby wipes, dummy, pacifier
+- Pet: dog food, cat food, dog treats, dog chews, pet supplies, bird seed, cat litter
+- House: toilet roll, washing powder, cleaning products, bin bags, kitchen roll, soap, shampoo
+- Health: vitamins, medicine, paracetamol, plasters, supplements
 
 RESPONSE FORMAT:
 {
@@ -218,32 +214,27 @@ RESPONSE FORMAT:
       "itemId": 1,
       "itemName": "Dog food",
       "newLastPurchased": "2025-07-22",
-      "newDurationDays": 14,
-      "reason": "User said dog food good for 2 weeks"
+      "keepExistingDuration": true,
+      "reason": "User mentioned existing item - updating timeline"
     }
   ],
   "newItems": [
     {
-      "itemName": "Baby wipes",
-      "category": "Baby",
+      "itemName": "Pasta",
+      "category": "Food",
       "lastPurchased": "2025-07-22",
-      "durationDays": 7,
-      "reason": "User mentioned baby wipes not in inventory"
+      "durationDays": null,
+      "reason": "User mentioned new one-off item"
     }
   ],
   "removeItems": []
 }
 
 EXAMPLES:
-- "Baby wipes last 1 week" → newItems: [Baby wipes], NO updates to nappies
-- "Dog food good for 2 weeks" → updates: [Dog food ID], NO updates to dog treats
-- "Milk every 7 days, bread nearly out" → Process milk separately from bread
-
-FUTURE ENHANCEMENT MARKERS:
-<!-- TODO: Add confidence scoring for uncertain matches -->
-<!-- TODO: Add undo capability for incorrect updates -->
-<!-- TODO: Support quantity tracking (packs, bottles, etc) -->
-<!-- TODO: Add multi-location support (kitchen, bathroom, etc) -->
+- "pasta" (pasta exists in inventory) → updates: [existing pasta with today's date]
+- "pasta" (pasta NOT in inventory) → newItems: [pasta with null duration - one-off item]
+- "dog food good for 3 weeks" (existing) → updates: [dog food with 21 days duration]
+- "birthday candles" (new) → newItems: [birthday candles with null duration]
 
 Return ONLY valid JSON. Be extremely strict about item isolation.`;
 
@@ -353,6 +344,27 @@ app.delete('/api/items/:id', async (req, res) => {
   }
 });
 
+// Debug endpoint to check recent database items
+app.get('/api/debug-items', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT id, name, category, last_purchased, estimated_duration_days, created_at, status
+      FROM items 
+      WHERE status = 'active' 
+      ORDER BY id DESC 
+      LIMIT 15
+    `);
+    
+    res.json({
+      totalItems: result.rows.length,
+      recentItems: result.rows,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Debug endpoint to test Claude HTTP integration
 app.post('/api/debug-claude', async (req, res) => {
   const { userInput } = req.body;
@@ -429,45 +441,38 @@ app.post('/api/process-response', async (req, res) => {
     
     let updatesApplied = [];
     
-    // Process updates to EXISTING items
+    // Process updates to EXISTING items (Option A logic)
     if (claudeResponse.updates && claudeResponse.updates.length > 0) {
       for (const update of claudeResponse.updates) {
         if (update.itemId) {
-          // Update by ID (most reliable)
-          await pool.query(
-            'UPDATE items SET last_purchased = $1, estimated_duration_days = $2 WHERE id = $3',
-            [update.newLastPurchased, update.newDurationDays, update.itemId]
-          );
-          updatesApplied.push(`Updated: ${update.itemName} - ${update.reason}`);
-        } else if (update.itemName) {
-          // Fallback: find by name similarity (should be rare with new logic)
-          const item = items.find(i => 
-            i.name.toLowerCase().includes(update.itemName.toLowerCase()) ||
-            update.itemName.toLowerCase().includes(i.name.toLowerCase())
-          );
-          
-          if (item) {
+          if (update.keepExistingDuration) {
+            // Update only the purchase date, keep existing duration
+            await pool.query(
+              'UPDATE items SET last_purchased = $1 WHERE id = $2',
+              [update.newLastPurchased, update.itemId]
+            );
+          } else {
+            // Update both date and duration
             await pool.query(
               'UPDATE items SET last_purchased = $1, estimated_duration_days = $2 WHERE id = $3',
-              [update.newLastPurchased, update.newDurationDays, item.id]
+              [update.newLastPurchased, update.newDurationDays, update.itemId]
             );
-            updatesApplied.push(`Updated: ${item.name} - ${update.reason}`);
           }
+          updatesApplied.push(`Updated: ${update.itemName} - ${update.reason}`);
         }
       }
     }
     
-    // Add NEW items
+    // Add NEW items (recurring or one-off)
     if (claudeResponse.newItems && claudeResponse.newItems.length > 0) {
       for (const newItem of claudeResponse.newItems) {
         const insertResult = await pool.query(
           'INSERT INTO items (name, category, last_purchased, estimated_duration_days) VALUES ($1, $2, $3, $4) RETURNING *',
           [newItem.itemName, newItem.category, newItem.lastPurchased, newItem.durationDays]
         );
-        updatesApplied.push(`Added: ${newItem.itemName} (${newItem.category}) - ${newItem.reason}`);
         
-        // TODO: Add confidence scoring for new items
-        // TODO: Add undo tracking for this operation
+        const itemType = newItem.durationDays ? 'recurring' : 'one-off';
+        updatesApplied.push(`Added: ${newItem.itemName} (${itemType}) - ${newItem.reason}`);
       }
     }
     
@@ -479,15 +484,13 @@ app.post('/api/process-response', async (req, res) => {
           [`%${removeItem.itemName}%`]
         );
         updatesApplied.push(`Removed: ${removeItem.itemName}`);
-        
-        // TODO: Add soft delete with undo capability
       }
     }
     
     res.json({
       message: 'Response processed successfully',
       updatesApplied: updatesApplied,
-      claudeResponse: claudeResponse // Include for debugging
+      claudeResponse: claudeResponse
     });
   } catch (error) {
     console.error('Error processing response:', error);
@@ -511,7 +514,7 @@ app.post('/webhook/email-reply', (req, res) => {
   }
 });
 
-// SMS webhook with detailed database debug logging
+// SMS webhook with Option A logic + one-off items
 app.post('/webhook/sms-reply', async (req, res) => {
   try {
     const { Body, From } = req.body;
@@ -526,22 +529,32 @@ app.post('/webhook/sms-reply', async (req, res) => {
     
     let updatesApplied = [];
     
-    // Process updates to EXISTING items with detailed logging
+    // Process updates to EXISTING items (Option A logic)
     if (claudeResponse.updates && claudeResponse.updates.length > 0) {
       for (const update of claudeResponse.updates) {
         if (update.itemId) {
           console.log('📱 Attempting database UPDATE for itemId:', update.itemId);
           console.log('📱 UPDATE values:', {
             lastPurchased: update.newLastPurchased,
-            durationDays: update.newDurationDays,
+            keepExistingDuration: update.keepExistingDuration,
             itemId: update.itemId
           });
           
           try {
-            const updateResult = await pool.query(
-              'UPDATE items SET last_purchased = $1, estimated_duration_days = $2 WHERE id = $3 RETURNING *',
-              [update.newLastPurchased, update.newDurationDays, update.itemId]
-            );
+            let updateResult;
+            if (update.keepExistingDuration) {
+              // Update only purchase date, keep existing duration
+              updateResult = await pool.query(
+                'UPDATE items SET last_purchased = $1 WHERE id = $2 RETURNING *',
+                [update.newLastPurchased, update.itemId]
+              );
+            } else {
+              // Update both date and duration
+              updateResult = await pool.query(
+                'UPDATE items SET last_purchased = $1, estimated_duration_days = $2 WHERE id = $3 RETURNING *',
+                [update.newLastPurchased, update.newDurationDays, update.itemId]
+              );
+            }
             
             console.log('📱 UPDATE result:', updateResult.rows);
             
@@ -558,7 +571,7 @@ app.post('/webhook/sms-reply', async (req, res) => {
       }
     }
     
-    // Add NEW items with detailed logging
+    // Add NEW items (recurring or one-off)
     if (claudeResponse.newItems && claudeResponse.newItems.length > 0) {
       for (const newItem of claudeResponse.newItems) {
         console.log('📱 Attempting database INSERT for:', newItem.itemName);
@@ -578,7 +591,8 @@ app.post('/webhook/sms-reply', async (req, res) => {
           console.log('📱 INSERT result:', insertResult.rows);
           
           if (insertResult.rows.length > 0) {
-            updatesApplied.push(`Added ${newItem.itemName}`);
+            const itemType = newItem.durationDays ? 'recurring' : 'one-off';
+            updatesApplied.push(`Added ${newItem.itemName} (${itemType})`);
             console.log('📱 ✅ Successfully inserted:', newItem.itemName, 'with ID:', insertResult.rows[0].id);
           } else {
             console.log('📱 ❌ INSERT returned no rows for:', newItem.itemName);
@@ -589,7 +603,7 @@ app.post('/webhook/sms-reply', async (req, res) => {
       }
     }
     
-    // Remove items with detailed logging
+    // Remove items
     if (claudeResponse.removeItems && claudeResponse.removeItems.length > 0) {
       for (const removeItem of claudeResponse.removeItems) {
         console.log('📱 Attempting database DELETE for:', removeItem.itemName);
@@ -632,7 +646,7 @@ app.post('/webhook/sms-reply', async (req, res) => {
   }
 });
 
-// Daily reminder schedule
+// Daily reminder schedule (only includes recurring items)
 cron.schedule('0 9 * * *', async () => {
   console.log('🕘 Running daily reminder check...');
   
