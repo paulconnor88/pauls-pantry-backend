@@ -36,7 +36,7 @@ const PORT = process.env.PORT || 3001;
 // Middleware
 app.use(cors());
 app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.urlencoded({ extended: true })); // FIXED: Added for Twilio webhooks
 app.use(express.raw({ type: 'text/plain' }));
 
 // Email configuration
@@ -456,50 +456,79 @@ app.post('/webhook/email-reply', (req, res) => {
   }
 });
 
-// Webhook for SMS replies  
+// FIXED: SMS webhook with proper error handling
 app.post('/webhook/sms-reply', async (req, res) => {
   try {
-    const { Body, From } = req.body; // Twilio webhook format
+    const { Body, From } = req.body;
     console.log('📱 Received SMS reply:', Body, 'from:', From);
     
-    // Process SMS using existing Claude logic
+    // Get active items
     const result = await pool.query("SELECT * FROM items WHERE status = 'active'");
     const items = result.rows;
     
+    // Process with Claude
     const claudeResponse = await processWithClaude(Body, items);
     
-    // Apply updates (same logic as /api/process-response)
     let updatesApplied = [];
     const today = new Date().toISOString().split('T')[0];
     
+    // Process updates to EXISTING items (same logic as /api/process-response)
     if (claudeResponse.updates && claudeResponse.updates.length > 0) {
       for (const update of claudeResponse.updates) {
-        const item = items.find(i => 
-          i.name.toLowerCase().includes(update.itemName.toLowerCase()) ||
-          update.itemName.toLowerCase().includes(i.name.toLowerCase())
-        );
-        
-        if (item && update.daysUntilNeeded) {
-          const targetDate = new Date();
-          targetDate.setDate(targetDate.getDate() + update.daysUntilNeeded);
-          const calculatedDate = new Date(targetDate);
-          calculatedDate.setDate(calculatedDate.getDate() - item.estimated_duration_days);
-          const newLastPurchased = calculatedDate.toISOString().split('T')[0];
-          
+        if (update.itemId) {
+          // Update by ID (most reliable)
           await pool.query(
-            'UPDATE items SET last_purchased = $1 WHERE id = $2',
-            [newLastPurchased, item.id]
+            'UPDATE items SET last_purchased = $1, estimated_duration_days = $2 WHERE id = $3',
+            [update.newLastPurchased, update.newDurationDays, update.itemId]
+          );
+          updatesApplied.push(`Updated: ${update.itemName} - ${update.reason}`);
+        } else if (update.itemName) {
+          // Fallback: find by name similarity (with safe null check)
+          const item = items.find(i => 
+            i.name.toLowerCase().includes(update.itemName.toLowerCase()) ||
+            update.itemName.toLowerCase().includes(i.name.toLowerCase())
           );
           
-          updatesApplied.push(item.name);
+          if (item) {
+            await pool.query(
+              'UPDATE items SET last_purchased = $1, estimated_duration_days = $2 WHERE id = $3',
+              [update.newLastPurchased, update.newDurationDays, item.id]
+            );
+            updatesApplied.push(`Updated: ${item.name} - ${update.reason}`);
+          }
         }
+      }
+    }
+    
+    // Add NEW items
+    if (claudeResponse.newItems && claudeResponse.newItems.length > 0) {
+      for (const newItem of claudeResponse.newItems) {
+        const insertResult = await pool.query(
+          'INSERT INTO items (name, category, last_purchased, estimated_duration_days) VALUES ($1, $2, $3, $4) RETURNING *',
+          [newItem.itemName, newItem.category, newItem.lastPurchased, newItem.durationDays]
+        );
+        updatesApplied.push(`Added: ${newItem.itemName} (${newItem.category})`);
+      }
+    }
+    
+    // Remove items if requested
+    if (claudeResponse.removeItems && claudeResponse.removeItems.length > 0) {
+      for (const removeItem of claudeResponse.removeItems) {
+        await pool.query(
+          "UPDATE items SET status = 'deleted' WHERE name ILIKE $1",
+          [`%${removeItem.itemName}%`]
+        );
+        updatesApplied.push(`Removed: ${removeItem.itemName}`);
       }
     }
     
     // Send confirmation SMS if updates were made
     if (updatesApplied.length > 0 && process.env.TWILIO_PHONE_NUMBER) {
       const confirmationMsg = `✅ Updated: ${updatesApplied.join(', ')}`;
+      console.log('📱 Sending confirmation:', confirmationMsg);
       await twilioSendSMS(From, confirmationMsg);
+    } else {
+      console.log('📱 No updates applied or no Twilio phone configured');
     }
     
     res.status(200).send('<Response></Response>'); // TwiML response
