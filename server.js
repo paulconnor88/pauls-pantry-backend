@@ -164,18 +164,21 @@ ${items.map(item => `- ID:${item.id} "${item.name}" (${item.category})`).join('\
 USER SAID: "${response}"
 
 ITEM MATCHING LOGIC:
-1. If user mentions an item that's clearly the SAME as existing item → UPDATE
-   - "fairy liquid" = "washing up liquid" = "dish soap" (same item)
-   - "toilet paper" = "toilet roll" (same item) 
-   - "washing powder" = "laundry detergent" (same item)
-   - "dog food" mentioned when "dog food" exists → UPDATE existing
+1. ONLY update items that the user explicitly mentions by name OR obvious synonyms
+   - "washing up liquid" = "fairy liquid" = "dish soap" (same item)
+   - "toilet paper" = "toilet roll" (same item)
+   - "milk" ≠ "washing powder" (completely different items)
+   - "dog food" ≠ "dog treats" (different items)
 
-2. If user mentions item that doesn't exist in inventory → CREATE NEW
-   - "milk" mentioned but no milk in inventory → ADD new "milk"
+2. If user mentions item name or clear synonym → UPDATE that item
+3. If user mentions completely new item → CREATE NEW item  
+4. NEVER update items from different categories or unrelated items
+5. When uncertain if items are related → CREATE NEW item instead
 
-3. When in doubt about similarity → FAVOR UPDATING existing item
-   - Better to update wrong item than create duplicate items
-   - User can correct later if needed
+CATEGORY BOUNDARIES - Items from different categories are NEVER the same:
+- Food items (milk, bread) ≠ House items (washing powder, toilet roll)
+- Pet items (dog food) ≠ Baby items (nappies)
+- Only match items within the same category AND with similar names
 
 CATEGORIES:
 - Food: milk, bread, eggs, cheese, butter, rice, pasta, cereal, fruit, vegetables
