@@ -33,6 +33,9 @@ const twilioSendSMS = async (phoneNumber, message) => {
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// OI! SMS FLAG - When SMS updates happen, React app needs to know!
+let lastSMSUpdate = 0;
+
 // Middleware
 app.use(cors());
 app.use(express.json());
@@ -149,7 +152,7 @@ const generateReminderSMS = (lowItems) => {
   return `Paul's Pantry: Low on ${itemNames}. Reply with status!`;
 };
 
-// ENHANCED Claude HTTP Integration - Handles recurring items + one-off shopping list
+// FIXED Claude HTTP Integration - STRICT item isolation
 async function processWithClaude(response, items) {
   if (!process.env.ANTHROPIC_API_KEY) {
     console.log('❌ Anthropic API key not available');
@@ -159,40 +162,37 @@ async function processWithClaude(response, items) {
   try {
     console.log('🤖 Processing with Claude via HTTP...');
     
-    const prompt = `You are a household inventory assistant. Parse natural language with strict item isolation.
+    const prompt = `You are a household inventory assistant. Parse natural language with EXTREME precision.
 
 CURRENT INVENTORY:
 ${items.map(item => `- ID:${item.id} "${item.name}" (${item.category}) - duration: ${item.estimated_duration_days || 'one-off'} days`).join('\n')}
 
 USER SAID: "${response}"
 
-CRITICAL LOGIC - OPTION A:
-1. If user mentions an item that EXISTS in inventory → UPDATE that existing item with today's date
-2. If user mentions an item that DOESN'T EXIST → CREATE new item
+CRITICAL RULES - ZERO CROSS-CONTAMINATION:
+1. ONLY process items that are EXPLICITLY mentioned by name
+2. If user says "pasta" → ONLY process pasta, NEVER touch milk, bread, or any other items
+3. If user says "dog food" → ONLY process dog food, NEVER touch dog treats or other pet items
+4. Each word/phrase must be processed in complete isolation
 
-ITEM TYPES:
-- RECURRING ITEMS: Have duration tracking (dog food, milk, toilet roll)
-- ONE-OFF ITEMS: No duration tracking (birthday candles, pasta for tonight)
+EXACT MATCHING LOGIC:
+- Extract ONLY the specific items mentioned by the user
+- Match against inventory using exact name matching or true synonyms
+- NEVER make category-based assumptions
+- NEVER update items that weren't explicitly mentioned
 
-DECISION FLOW:
-1. Extract items mentioned by user
-2. For each item:
-   - CHECK: Does exact item exist in inventory?
-   - IF YES → UPDATE existing item (reset timeline with today's date, keep existing duration)
-   - IF NO → CREATE new item (determine if recurring or one-off based on context)
-
-CONTEXT ANALYSIS FOR NEW ITEMS:
-- "dog food good for 3 weeks" → RECURRING (durationDays: 21)
-- "milk every 7 days" → RECURRING (durationDays: 7)  
-- "pasta" → ONE-OFF (durationDays: null)
-- "birthday candles" → ONE-OFF (durationDays: null)
-- "batteries" → ONE-OFF (durationDays: null)
-
-EXACT SYNONYMS (treat as same item):
+TRUE SYNONYMS ONLY:
 - "washing up liquid" = "fairy liquid" = "dish soap"
 - "toilet paper" = "toilet roll" = "loo roll"
 - "washing powder" = "laundry detergent"
 - "nappies" = "diapers"
+
+PROCESSING LOGIC:
+1. Parse user input for explicit item mentions
+2. For each mentioned item:
+   - IF exact match exists in inventory → UPDATE that item only
+   - IF no match exists → CREATE new item
+3. NEVER touch items that weren't mentioned
 
 TIME PARSING:
 - "today" / "now" = ${new Date().toISOString().split('T')[0]}
@@ -213,30 +213,29 @@ RESPONSE FORMAT:
     {
       "itemId": 1,
       "itemName": "Dog food",
-      "newLastPurchased": "2025-07-22",
+      "newLastPurchased": "2025-08-05",
       "keepExistingDuration": true,
-      "reason": "User mentioned existing item - updating timeline"
+      "reason": "User explicitly mentioned this item"
     }
   ],
   "newItems": [
     {
       "itemName": "Pasta",
       "category": "Food",
-      "lastPurchased": "2025-07-22",
+      "lastPurchased": "2025-08-05",
       "durationDays": null,
-      "reason": "User mentioned new one-off item"
+      "reason": "User mentioned new item not in inventory"
     }
   ],
   "removeItems": []
 }
 
-EXAMPLES:
-- "pasta" (pasta exists in inventory) → updates: [existing pasta with today's date]
-- "pasta" (pasta NOT in inventory) → newItems: [pasta with null duration - one-off item]
-- "dog food good for 3 weeks" (existing) → updates: [dog food with 21 days duration]
-- "birthday candles" (new) → newItems: [birthday candles with null duration]
+EXAMPLES OF CORRECT BEHAVIOR:
+- User says "pasta" → ONLY process pasta, ignore all other items
+- User says "dog food good for 2 weeks" → ONLY update dog food, ignore dog treats, milk, etc.
+- User says "milk and bread" → Process milk AND bread separately, ignore pasta, cheese, etc.
 
-Return ONLY valid JSON. Be extremely strict about item isolation.`;
+Return ONLY valid JSON. Be absolutely strict about item isolation - only touch items explicitly mentioned.`;
 
     console.log('📤 Sending prompt to Claude...');
 
@@ -294,6 +293,14 @@ Return ONLY valid JSON. Be extremely strict about item isolation.`;
 }
 
 // API Routes
+
+// SMS flag check - React app calls this to see if database changed
+app.get('/api/sms-flag', (req, res) => {
+  res.json({ 
+    lastSMSUpdate: lastSMSUpdate,
+    hasUpdate: lastSMSUpdate > 0
+  });
+});
 
 app.get('/api/items', async (req, res) => {
   try {
@@ -441,7 +448,7 @@ app.post('/api/process-response', async (req, res) => {
     
     let updatesApplied = [];
     
-    // Process updates to EXISTING items (Option A logic)
+    // Process updates to EXISTING items
     if (claudeResponse.updates && claudeResponse.updates.length > 0) {
       for (const update of claudeResponse.updates) {
         if (update.itemId) {
@@ -487,6 +494,12 @@ app.post('/api/process-response', async (req, res) => {
       }
     }
     
+    // SET SMS FLAG - Tell React app to refresh!
+    if (updatesApplied.length > 0) {
+      lastSMSUpdate = Date.now();
+      console.log('🔄 SMS FLAG SET - React will refresh!', new Date(lastSMSUpdate).toISOString());
+    }
+    
     res.json({
       message: 'Response processed successfully',
       updatesApplied: updatesApplied,
@@ -514,55 +527,47 @@ app.post('/webhook/email-reply', (req, res) => {
   }
 });
 
-// SMS webhook with Option A logic + one-off items
+// SMS webhook with FIXED Claude logic + SMS flag
 app.post('/webhook/sms-reply', async (req, res) => {
   try {
     const { Body, From } = req.body;
-    console.log('📱 Received SMS reply:', Body, 'from:', From);
+    console.log('📱 ===== SMS WEBHOOK START =====');
+    console.log('📱 SMS Body:', Body);
+    console.log('📱 From:', From);
     
     // Get active items
     const result = await pool.query("SELECT * FROM items WHERE status = 'active'");
     const items = result.rows;
+    console.log('📱 Current items count:', items.length);
     
-    // Process with Claude
+    // Process with FIXED Claude (strict item isolation)
     const claudeResponse = await processWithClaude(Body, items);
     
     let updatesApplied = [];
     
-    // Process updates to EXISTING items (Option A logic)
+    // Process updates to EXISTING items
     if (claudeResponse.updates && claudeResponse.updates.length > 0) {
       for (const update of claudeResponse.updates) {
         if (update.itemId) {
           console.log('📱 Attempting database UPDATE for itemId:', update.itemId);
-          console.log('📱 UPDATE values:', {
-            lastPurchased: update.newLastPurchased,
-            keepExistingDuration: update.keepExistingDuration,
-            itemId: update.itemId
-          });
           
           try {
             let updateResult;
             if (update.keepExistingDuration) {
-              // Update only purchase date, keep existing duration
               updateResult = await pool.query(
                 'UPDATE items SET last_purchased = $1 WHERE id = $2 RETURNING *',
                 [update.newLastPurchased, update.itemId]
               );
             } else {
-              // Update both date and duration
               updateResult = await pool.query(
                 'UPDATE items SET last_purchased = $1, estimated_duration_days = $2 WHERE id = $3 RETURNING *',
                 [update.newLastPurchased, update.newDurationDays, update.itemId]
               );
             }
             
-            console.log('📱 UPDATE result:', updateResult.rows);
-            
             if (updateResult.rows.length > 0) {
               updatesApplied.push(`${update.itemName} updated`);
               console.log('📱 ✅ Successfully updated:', update.itemName);
-            } else {
-              console.log('📱 ❌ UPDATE affected 0 rows for itemId:', update.itemId);
             }
           } catch (updateError) {
             console.error('📱 ❌ Database UPDATE error:', updateError);
@@ -571,16 +576,10 @@ app.post('/webhook/sms-reply', async (req, res) => {
       }
     }
     
-    // Add NEW items (recurring or one-off)
+    // Add NEW items
     if (claudeResponse.newItems && claudeResponse.newItems.length > 0) {
       for (const newItem of claudeResponse.newItems) {
         console.log('📱 Attempting database INSERT for:', newItem.itemName);
-        console.log('📱 INSERT values:', {
-          name: newItem.itemName,
-          category: newItem.category,
-          lastPurchased: newItem.lastPurchased,
-          durationDays: newItem.durationDays
-        });
         
         try {
           const insertResult = await pool.query(
@@ -588,14 +587,10 @@ app.post('/webhook/sms-reply', async (req, res) => {
             [newItem.itemName, newItem.category, newItem.lastPurchased, newItem.durationDays]
           );
           
-          console.log('📱 INSERT result:', insertResult.rows);
-          
           if (insertResult.rows.length > 0) {
             const itemType = newItem.durationDays ? 'recurring' : 'one-off';
             updatesApplied.push(`Added ${newItem.itemName} (${itemType})`);
             console.log('📱 ✅ Successfully inserted:', newItem.itemName, 'with ID:', insertResult.rows[0].id);
-          } else {
-            console.log('📱 ❌ INSERT returned no rows for:', newItem.itemName);
           }
         } catch (insertError) {
           console.error('📱 ❌ Database INSERT error:', insertError);
@@ -606,21 +601,15 @@ app.post('/webhook/sms-reply', async (req, res) => {
     // Remove items
     if (claudeResponse.removeItems && claudeResponse.removeItems.length > 0) {
       for (const removeItem of claudeResponse.removeItems) {
-        console.log('📱 Attempting database DELETE for:', removeItem.itemName);
-        
         try {
           const deleteResult = await pool.query(
             "UPDATE items SET status = 'deleted' WHERE name ILIKE $1 RETURNING *",
             [`%${removeItem.itemName}%`]
           );
           
-          console.log('📱 DELETE result:', deleteResult.rows);
-          
           if (deleteResult.rows.length > 0) {
             updatesApplied.push(`Removed ${removeItem.itemName}`);
             console.log('📱 ✅ Successfully removed:', removeItem.itemName);
-          } else {
-            console.log('📱 ❌ DELETE affected 0 rows for:', removeItem.itemName);
           }
         } catch (deleteError) {
           console.error('📱 ❌ Database DELETE error:', deleteError);
@@ -630,15 +619,20 @@ app.post('/webhook/sms-reply', async (req, res) => {
     
     console.log('📱 Final updates applied:', updatesApplied);
     
+    // SET SMS FLAG - Tell React app database changed!
+    if (updatesApplied.length > 0) {
+      lastSMSUpdate = Date.now();
+      console.log('📱 🚨 SMS FLAG SET - REACT APP WILL REFRESH! 🚨', new Date(lastSMSUpdate).toISOString());
+    }
+    
     // Send confirmation SMS
     if (updatesApplied.length > 0 && process.env.TWILIO_PHONE_NUMBER) {
       const confirmationMsg = `✅ ${updatesApplied.join(', ')}`;
       console.log('📱 Sending confirmation:', confirmationMsg);
       await twilioSendSMS(From, confirmationMsg);
-    } else {
-      console.log('📱 No updates applied or no Twilio phone configured');
     }
     
+    console.log('📱 ===== SMS WEBHOOK END =====');
     res.status(200).send('<Response></Response>');
   } catch (error) {
     console.error('❌ SMS webhook error:', error);
@@ -689,7 +683,8 @@ app.get('/health', (req, res) => {
     timestamp: new Date().toISOString(),
     claudeHTTP: !!process.env.ANTHROPIC_API_KEY,
     apiKey: !!process.env.ANTHROPIC_API_KEY,
-    databaseConnection: true
+    databaseConnection: true,
+    smsFlag: lastSMSUpdate
   });
 });
 
@@ -699,6 +694,7 @@ app.listen(PORT, () => {
   console.log(`📧 Email notifications: ${TO_EMAILS.join(', ')}`);
   console.log(`📅 Daily reminders scheduled for 9:00 AM`);
   console.log(`🤖 Claude HTTP: ${process.env.ANTHROPIC_API_KEY ? 'Ready' : 'API key missing'}`);
+  console.log(`📱 SMS Flag System: Ready`);
 });
 
 module.exports = app;
