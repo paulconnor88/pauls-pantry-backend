@@ -9,7 +9,7 @@ const Clock = ({ size }) => <span style={{ fontSize: size ? `${size}px` : '16px'
 const ShoppingCart = ({ size }) => <span style={{ fontSize: size ? `${size}px` : '16px' }}>🛒</span>;
 const Package = ({ size }) => <span style={{ fontSize: size ? `${size}px` : '16px' }}>📦</span>;
 
-const API_BASE_URL = 'https://pauls-pantry-backend-production.up.railway.app/api';
+const API_BASE_URL = 'https://pauls-pantry-d2237914b74d.herokuapp.com/api';
 
 const PaulsPantry = () => {
   const [items, setItems] = useState([]);
@@ -21,6 +21,10 @@ const PaulsPantry = () => {
   const [emailResponse, setEmailResponse] = useState('');
   const [processingResponse, setProcessingResponse] = useState(false);
   const [sendingEmail, setSendingEmail] = useState(false);
+  
+  // SMS FLAG SYSTEM - Check for SMS updates
+  const [lastCheckedSMS, setLastCheckedSMS] = useState(0);
+  const [smsUpdateDetected, setSmsUpdateDetected] = useState(false);
 
   const [newItem, setNewItem] = useState({
     name: '',
@@ -47,12 +51,51 @@ const PaulsPantry = () => {
     fetchItems();
   }, []);
   
+  // SMS FLAG CHECKER - Check for SMS updates every 3 seconds
+  useEffect(() => {
+    const checkForSMSUpdates = async () => {
+      try {
+        console.log('🔍 Checking for SMS updates...');
+        const response = await fetch(`${API_BASE_URL}/sms-flag`);
+        const data = await response.json();
+        
+        console.log('SMS flag data:', data);
+        
+        // If there's been an SMS update since we last checked
+        if (data.lastSMSUpdate > lastCheckedSMS) {
+          console.log('🆕 SMS update detected! Auto-refreshing items...');
+          setSmsUpdateDetected(true);
+          
+          // Refresh the items
+          await fetchItems();
+          
+          // Update our last checked time
+          setLastCheckedSMS(data.lastSMSUpdate);
+          
+          // Clear the visual indicator after 3 seconds
+          setTimeout(() => setSmsUpdateDetected(false), 3000);
+        }
+      } catch (error) {
+        console.error('Error checking SMS updates:', error);
+      }
+    };
+
+    // Check immediately when component loads
+    checkForSMSUpdates();
+    
+    // Then check every 3 seconds
+    const interval = setInterval(checkForSMSUpdates, 3000);
+    return () => clearInterval(interval);
+  }, [lastCheckedSMS]);
+  
   const fetchItems = async () => {
     try {
       setLoading(true);
+      console.log('📱 Fetching items from API...');
       const response = await fetch(`${API_BASE_URL}/items`);
       if (response.ok) {
         const data = await response.json();
+        console.log('📱 Fetched items:', data.length);
         setItems(data);
       } else {
         console.error('Failed to fetch items');
@@ -78,6 +121,9 @@ const PaulsPantry = () => {
   const getItemsRunningLow = () => {
     const today = new Date();
     return items.filter(item => {
+      // Skip one-off items (null duration)
+      if (!item.estimated_duration_days) return false;
+      
       const lastPurchased = new Date(item.last_purchased);
       const nextPurchaseDate = new Date(lastPurchased);
       nextPurchaseDate.setDate(lastPurchased.getDate() + item.estimated_duration_days);
@@ -276,6 +322,11 @@ const PaulsPantry = () => {
   };
 
   const getDaysUntilNeeded = (item) => {
+    // Handle one-off items (null duration)
+    if (!item.estimated_duration_days) {
+      return 'One-off item';
+    }
+    
     const lastPurchased = new Date(item.last_purchased);
     const nextPurchaseDate = new Date(lastPurchased);
     nextPurchaseDate.setDate(lastPurchased.getDate() + item.estimated_duration_days);
@@ -304,6 +355,13 @@ const PaulsPantry = () => {
         <div className="bg-white rounded-lg shadow-sm p-6 mb-6">
           <h1 className="text-2xl font-bold text-gray-900 mb-2">Paul's Pantry</h1>
           <p className="text-gray-600">Household essentials reminder system</p>
+          
+          {/* SMS Update Notification */}
+          {smsUpdateDetected && (
+            <div className="bg-green-100 border border-green-400 text-green-700 px-3 py-2 rounded text-sm mt-2">
+              📱 SMS update detected - refreshing data...
+            </div>
+          )}
           
           {/* Simple Stats */}
           <div className="grid grid-cols-3 gap-4 mt-4">
@@ -402,6 +460,12 @@ const PaulsPantry = () => {
                   >
                     <Plus size={20} />
                     Add Item
+                  </button>
+                  <button
+                    onClick={fetchItems}
+                    className="bg-gray-500 text-white px-3 py-2 rounded-lg hover:bg-gray-600 text-sm"
+                  >
+                    🔄 Refresh
                   </button>
                 </div>
               </div>
@@ -531,16 +595,24 @@ const PaulsPantry = () => {
                         const daysUntil = getDaysUntilNeeded(item);
                         const isUpcoming = upcomingItems.includes(item);
                         const isRecent = recentItems.includes(item);
-                        const isOverdue = daysUntil < 0;
+                        const isOverdue = typeof daysUntil === 'number' && daysUntil < 0;
+                        const isOneOff = !item.estimated_duration_days;
                         
                         return (
                           <div key={item.id} className="p-4 flex items-center justify-between">
                             <div className="flex-1">
                               <div className="flex items-center gap-2">
                                 <span className="font-medium">{item.name}</span>
-                                <span className="px-2 py-1 rounded text-xs bg-gray-100 text-gray-600">
-                                  {getFrequencyLabel(item.estimated_duration_days)}
-                                </span>
+                                {!isOneOff && (
+                                  <span className="px-2 py-1 rounded text-xs bg-gray-100 text-gray-600">
+                                    {getFrequencyLabel(item.estimated_duration_days)}
+                                  </span>
+                                )}
+                                {isOneOff && (
+                                  <span className="px-2 py-1 rounded text-xs bg-purple-100 text-purple-600">
+                                    One-off
+                                  </span>
+                                )}
                                 {isOverdue && (
                                   <span className="px-2 py-1 rounded text-xs bg-red-100 text-red-600">
                                     Overdue
@@ -559,8 +631,13 @@ const PaulsPantry = () => {
                               </div>
                               <div className="text-sm text-gray-600 mt-1">
                                 Last purchased: {new Date(item.last_purchased).toLocaleDateString()}
-                                {' • '}
-                                {daysUntil > 0 ? `${daysUntil} days left` : `${Math.abs(daysUntil)} days overdue`}
+                                {typeof daysUntil === 'number' && (
+                                  <>
+                                    {' • '}
+                                    {daysUntil > 0 ? `${daysUntil} days left` : `${Math.abs(daysUntil)} days overdue`}
+                                  </>
+                                )}
+                                {isOneOff && ' • One-off shopping item'}
                               </div>
                             </div>
                             <div className="flex gap-2">
